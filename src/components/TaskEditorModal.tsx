@@ -8,7 +8,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import { formatIso, fromIso, todayIso, toIso } from '../dates';
+import { defaultDueDate, formatIso, fromIso, todayIso, toIso } from '../dates';
 import { Task } from '../types';
 
 interface Props {
@@ -22,15 +22,15 @@ interface Props {
 export default function TaskEditorModal({ visible, task, onSave, onCancel }: Props) {
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
-  const [dueDate, setDueDate] = useState<string | null>(todayIso());
+  const [dueDate, setDueDate] = useState<string | null>(defaultDueDate());
   const [showPicker, setShowPicker] = useState(false);
 
   useEffect(() => {
     if (visible) {
       setTitle(task?.title ?? '');
       setDescription(task?.description ?? '');
-      // Due date is optional but defaults to today for new tasks.
-      setDueDate(task ? task.dueDate : todayIso());
+      // Due date is optional; new tasks default to today (tomorrow after 8pm).
+      setDueDate(task ? task.dueDate : defaultDueDate());
       setShowPicker(false);
     }
   }, [visible, task]);

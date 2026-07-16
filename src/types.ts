@@ -15,6 +15,12 @@ export interface Task {
   createdAt: string;
 }
 
+export interface DictionaryEntry {
+  id: number;
+  name: string;
+  uses: number;
+}
+
 export interface ShoppingItem {
   id: number;
   name: string;

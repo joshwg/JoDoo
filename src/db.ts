@@ -1,5 +1,6 @@
 import * as SQLite from 'expo-sqlite';
-import { ShoppingItem, Task, TodoList } from './types';
+import { SEED_FOOD_ITEMS } from './foodItems';
+import { DictionaryEntry, ShoppingItem, Task, TodoList } from './types';
 
 const db = SQLite.openDatabaseSync('jodoo.db');
 
@@ -27,11 +28,30 @@ export function initDb(): void {
       checked INTEGER NOT NULL DEFAULT 0,
       position INTEGER NOT NULL DEFAULT 0
     );
+    CREATE TABLE IF NOT EXISTS dictionary (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      name_lower TEXT NOT NULL UNIQUE,
+      uses INTEGER NOT NULL DEFAULT 0
+    );
   `);
   // Start the user off with one list so the To Do section is never empty.
   const row = db.getFirstSync<{ n: number }>('SELECT COUNT(*) AS n FROM lists');
   if (!row || row.n === 0) {
     createList();
+  }
+  // Seed the autocomplete dictionary once; after that users own it.
+  const dict = db.getFirstSync<{ n: number }>('SELECT COUNT(*) AS n FROM dictionary');
+  if (!dict || dict.n === 0) {
+    db.withTransactionSync(() => {
+      for (const item of SEED_FOOD_ITEMS) {
+        db.runSync(
+          'INSERT OR IGNORE INTO dictionary (name, name_lower) VALUES (?, ?)',
+          item,
+          item.toLowerCase()
+        );
+      }
+    });
   }
 }
 
@@ -187,4 +207,95 @@ export function deleteShoppingItem(id: number): void {
 
 export function clearCheckedShoppingItems(): void {
   db.runSync('DELETE FROM shopping_items WHERE checked = 1');
+}
+
+// ---------- Autocomplete dictionary ----------
+
+function escapeLike(s: string): string {
+  return s.replace(/[\\%_]/g, (c) => '\\' + c);
+}
+
+/**
+ * Up to `limit` dictionary entries starting with `prefix` (case-insensitive),
+ * most-used first so past picks float to the top.
+ */
+export function suggestItems(prefix: string, limit = 3): DictionaryEntry[] {
+  const p = prefix.trim().toLowerCase();
+  if (!p) return [];
+  return db.getAllSync<DictionaryEntry>(
+    "SELECT id, name, uses FROM dictionary WHERE name_lower LIKE ? ESCAPE '\\' ORDER BY uses DESC, name_lower LIMIT ?",
+    escapeLike(p) + '%',
+    limit
+  );
+}
+
+/**
+ * Called whenever the user puts an item on the shopping list. Bumps the usage
+ * count; unknown items are added to the dictionary; a known item typed with
+ * different casing adopts the user's casing.
+ */
+export function recordItemUse(raw: string): void {
+  const name = raw.trim();
+  if (!name) return;
+  const lower = name.toLowerCase();
+  const existing = db.getFirstSync<{ id: number; name: string }>(
+    'SELECT id, name FROM dictionary WHERE name_lower = ?',
+    lower
+  );
+  if (existing) {
+    db.runSync('UPDATE dictionary SET uses = uses + 1, name = ? WHERE id = ?', name, existing.id);
+  } else {
+    db.runSync('INSERT INTO dictionary (name, name_lower, uses) VALUES (?, ?, 1)', name, lower);
+  }
+}
+
+export function getDictionary(filter = ''): DictionaryEntry[] {
+  const f = filter.trim().toLowerCase();
+  if (!f) {
+    return db.getAllSync<DictionaryEntry>(
+      'SELECT id, name, uses FROM dictionary ORDER BY name_lower'
+    );
+  }
+  return db.getAllSync<DictionaryEntry>(
+    "SELECT id, name, uses FROM dictionary WHERE name_lower LIKE ? ESCAPE '\\' ORDER BY name_lower",
+    '%' + escapeLike(f) + '%'
+  );
+}
+
+/** Adds an entry; case-insensitive duplicates are silently ignored, but a
+ *  duplicate typed with different casing updates the stored casing. */
+export function addDictionaryEntry(raw: string): void {
+  const name = raw.trim();
+  if (!name) return;
+  const lower = name.toLowerCase();
+  const existing = db.getFirstSync<{ id: number; name: string }>(
+    'SELECT id, name FROM dictionary WHERE name_lower = ?',
+    lower
+  );
+  if (existing) {
+    if (existing.name !== name) {
+      db.runSync('UPDATE dictionary SET name = ? WHERE id = ?', name, existing.id);
+    }
+    return;
+  }
+  db.runSync('INSERT INTO dictionary (name, name_lower) VALUES (?, ?)', name, lower);
+}
+
+/** Renames an entry; silently ignored if the new name is empty or collides
+ *  (case-insensitively) with a different entry. */
+export function editDictionaryEntry(id: number, raw: string): void {
+  const name = raw.trim();
+  if (!name) return;
+  const lower = name.toLowerCase();
+  const clash = db.getFirstSync<{ id: number }>(
+    'SELECT id FROM dictionary WHERE name_lower = ? AND id != ?',
+    lower,
+    id
+  );
+  if (clash) return;
+  db.runSync('UPDATE dictionary SET name = ?, name_lower = ? WHERE id = ?', name, lower, id);
+}
+
+export function deleteDictionaryEntry(id: number): void {
+  db.runSync('DELETE FROM dictionary WHERE id = ?', id);
 }
