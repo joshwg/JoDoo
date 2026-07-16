@@ -6,6 +6,11 @@
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#1A237E"
+    },
     "ios": {
       "supportsTablet": true
     },
@@ -25,6 +30,12 @@
     "plugins": [
       "expo-sqlite",
       "@react-native-community/datetimepicker"
-    ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "36025335-fcc6-4a9b-9048-c57c7803672c"
+      }
+    },
+    "owner": "joshwg"
   }
 }
