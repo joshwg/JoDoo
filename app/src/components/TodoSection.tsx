@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Dimensions,
   FlatList,
   KeyboardAvoidingView,
   Modal,
@@ -20,6 +21,7 @@ import { createShare, fetchShare } from '../syncClient';
 import { pushTodoListIfShared, refreshSyncConnections } from '../syncManager';
 import { Task, TodoList } from '../types';
 import EnterKeyModal from './EnterKeyModal';
+import ListTab from './ListTab';
 import ServerSettingsModal from './ServerSettingsModal';
 import ShareKeyModal from './ShareKeyModal';
 import TaskCard from './TaskCard';
@@ -38,6 +40,10 @@ export default function TodoSection() {
   const [serverSettingsVisible, setServerSettingsVisible] = useState(false);
   const [shareBusy, setShareBusy] = useState(false);
   const [shareKeyShown, setShareKeyShown] = useState<string | null>(null);
+  const [draggingTaskId, setDraggingTaskId] = useState<number | null>(null);
+  const [dragOverListId, setDragOverListId] = useState<number | null>(null);
+  const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
+  const [draggingListId, setDraggingListId] = useState<number | null>(null);
 
   const refreshLists = useCallback((preferId?: number) => {
     const all = db.getLists();
@@ -72,6 +78,237 @@ export default function TodoSection() {
   );
 
   const activeList = lists.find((l) => l.id === activeListId) ?? null;
+
+  // Keep a ref of the latest task list so drag handlers (created once inside
+  // PanResponder-driven callbacks) always see fresh data.
+  const tasksRef = useRef(tasks);
+  useEffect(() => {
+    tasksRef.current = tasks;
+  }, [tasks]);
+
+  // ----- drag-and-drop: move between lists (drop on a tab) or reorder within a list -----
+
+  type Rect = { x: number; y: number; width: number; height: number };
+  const tabRefs = useRef(new Map<number, View>()).current;
+  const tabRectsRef = useRef(new Map<number, Rect>()).current;
+  const taskRefs = useRef(new Map<number, View>()).current;
+  const taskRectsRef = useRef(new Map<number, Rect>()).current;
+  // Band (page-Y range) covered by the tab strip, used to gate auto-scroll so
+  // it only kicks in while the drag is actually up near the tabs.
+  const tabStripBandRef = useRef<{ top: number; bottom: number } | null>(null);
+
+  // Auto-scroll the horizontal tab strip while dragging near a screen edge,
+  // so tabs that are currently scrolled off-screen can still be reached.
+  const tabScrollViewRef = useRef<ScrollView>(null);
+  const tabScrollXRef = useRef(0);
+  const dragPageRef = useRef<{ x: number; y: number } | null>(null);
+  const autoScrollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const AUTOSCROLL_EDGE = 48;
+  const AUTOSCROLL_STEP = 16;
+
+  // Auto-scroll the task list vertically while dragging near its top/bottom
+  // edge, so tasks currently scrolled off-screen can still be reached.
+  const taskListContainerRef = useRef<View>(null);
+  const taskListRectRef = useRef<Rect | null>(null);
+  const taskListRef = useRef<FlatList<Task>>(null);
+  const taskScrollYRef = useRef(0);
+
+  const measureTabs = useCallback(() => {
+    tabRefs.forEach((view, listId) => {
+      view.measureInWindow((x, y, width, height) => {
+        tabRectsRef.set(listId, { x, y, width, height });
+        const band = tabStripBandRef.current;
+        tabStripBandRef.current = {
+          top: band ? Math.min(band.top, y) : y,
+          bottom: band ? Math.max(band.bottom, y + height) : y + height,
+        };
+      });
+    });
+  }, [tabRefs, tabRectsRef]);
+
+  const measureDragTargets = useCallback(() => {
+    measureTabs();
+    taskRefs.forEach((view, taskId) => {
+      view.measureInWindow((x, y, width, height) => {
+        taskRectsRef.set(taskId, { x, y, width, height });
+      });
+    });
+    taskListContainerRef.current?.measureInWindow((x, y, width, height) => {
+      taskListRectRef.current = { x, y, width, height };
+    });
+  }, [measureTabs, taskRefs, taskRectsRef]);
+
+  const stopAutoScroll = useCallback(() => {
+    if (autoScrollTimerRef.current != null) {
+      clearInterval(autoScrollTimerRef.current);
+      autoScrollTimerRef.current = null;
+    }
+  }, []);
+
+  const startAutoScroll = useCallback(() => {
+    stopAutoScroll();
+    autoScrollTimerRef.current = setInterval(() => {
+      const point = dragPageRef.current;
+      if (!point) return;
+
+      const band = tabStripBandRef.current;
+      if (band && point.y >= band.top - 20 && point.y <= band.bottom + 60) {
+        const screenWidth = Dimensions.get('window').width;
+        let delta = 0;
+        if (point.x < AUTOSCROLL_EDGE) delta = -AUTOSCROLL_STEP;
+        else if (point.x > screenWidth - AUTOSCROLL_EDGE) delta = AUTOSCROLL_STEP;
+        if (delta !== 0) {
+          const newX = Math.max(0, tabScrollXRef.current + delta);
+          tabScrollViewRef.current?.scrollTo({ x: newX, animated: false });
+          // Tab positions shifted, so re-measure them for accurate drop hit-testing.
+          measureTabs();
+        }
+      }
+
+      const listRect = taskListRectRef.current;
+      if (listRect) {
+        let vDelta = 0;
+        if (point.y < listRect.y + AUTOSCROLL_EDGE) vDelta = -AUTOSCROLL_STEP;
+        else if (point.y > listRect.y + listRect.height - AUTOSCROLL_EDGE) vDelta = AUTOSCROLL_STEP;
+        if (vDelta !== 0) {
+          const newY = Math.max(0, taskScrollYRef.current + vDelta);
+          taskListRef.current?.scrollToOffset({ offset: newY, animated: false });
+          // Card positions shifted, so re-measure them for accurate drop hit-testing.
+          taskRefs.forEach((view, taskId) => {
+            view.measureInWindow((x, y, width, height) => {
+              taskRectsRef.set(taskId, { x, y, width, height });
+            });
+          });
+        }
+      }
+    }, 32);
+  }, [stopAutoScroll, measureTabs, taskRefs, taskRectsRef]);
+
+  useEffect(() => stopAutoScroll, [stopAutoScroll]);
+
+  const handleDragStart = useCallback(
+    (task: Task) => {
+      measureDragTargets();
+      setDraggingTaskId(task.id);
+      setDragOverListId(null);
+      setDragOverIndex(null);
+      startAutoScroll();
+    },
+    [measureDragTargets, startAutoScroll]
+  );
+
+  const handleDragMove = useCallback((_task: Task, pageX: number, pageY: number) => {
+    dragPageRef.current = { x: pageX, y: pageY };
+
+    let overList: number | null = null;
+    for (const [listId, rect] of tabRectsRef) {
+      if (
+        pageX >= rect.x &&
+        pageX <= rect.x + rect.width &&
+        pageY >= rect.y &&
+        pageY <= rect.y + rect.height
+      ) {
+        overList = listId;
+        break;
+      }
+    }
+    setDragOverListId(overList);
+
+    if (overList != null) {
+      setDragOverIndex(null);
+      return;
+    }
+
+    const currentTasks = tasksRef.current;
+    let index = currentTasks.length;
+    for (let i = 0; i < currentTasks.length; i++) {
+      const rect = taskRectsRef.get(currentTasks[i].id);
+      if (!rect) continue;
+      if (pageY < rect.y + rect.height / 2) {
+        index = i;
+        break;
+      }
+    }
+    setDragOverIndex(index);
+  }, [tabRectsRef, taskRectsRef]);
+
+  const handleDragEnd = useCallback(
+    (task: Task) => {
+      stopAutoScroll();
+      dragPageRef.current = null;
+      setDraggingTaskId(null);
+      setDragOverListId(null);
+      setDragOverIndex(null);
+
+      if (dragOverListId != null && dragOverListId !== task.listId) {
+        db.moveTaskToList(task.id, dragOverListId);
+        refreshTasks(activeListIdRef.current);
+        pushTodoListIfShared(task.listId);
+        pushTodoListIfShared(dragOverListId);
+        return;
+      }
+
+      if (dragOverIndex != null && activeListIdRef.current != null) {
+        const current = tasksRef.current;
+        const originalIndex = current.findIndex((t) => t.id === task.id);
+        const withoutDragged = current.filter((t) => t.id !== task.id);
+        let insertAt = dragOverIndex;
+        if (originalIndex !== -1 && originalIndex < dragOverIndex) insertAt -= 1;
+        insertAt = Math.max(0, Math.min(insertAt, withoutDragged.length));
+        withoutDragged.splice(insertAt, 0, task);
+        const orderedIds = withoutDragged.map((t) => t.id);
+        db.reorderTasks(activeListIdRef.current, orderedIds);
+        refreshTasks(activeListIdRef.current);
+        pushTodoListIfShared(activeListIdRef.current);
+      }
+    },
+    [dragOverListId, dragOverIndex, refreshTasks, stopAutoScroll]
+  );
+
+  // ----- drag-and-drop: reorder the lists (tabs) themselves -----
+
+  const handleListDragStart = useCallback(
+    (list: TodoList) => {
+      measureTabs();
+      setDraggingListId(list.id);
+      setDragOverListId(null);
+      startAutoScroll();
+    },
+    [measureTabs, startAutoScroll]
+  );
+
+  const handleListDragMove = useCallback((_list: TodoList, pageX: number, pageY: number) => {
+    dragPageRef.current = { x: pageX, y: pageY };
+    let overId: number | null = null;
+    for (const [listId, rect] of tabRectsRef) {
+      if (pageX >= rect.x && pageX <= rect.x + rect.width) {
+        overId = listId;
+        break;
+      }
+    }
+    setDragOverListId(overId);
+  }, [tabRectsRef]);
+
+  const handleListDragEnd = useCallback(
+    (list: TodoList) => {
+      stopAutoScroll();
+      dragPageRef.current = null;
+      setDraggingListId(null);
+      const overId = dragOverListId;
+      setDragOverListId(null);
+
+      if (overId != null && overId !== list.id) {
+        const current = listsRef.current;
+        const withoutDragged = current.filter((l) => l.id !== list.id);
+        const targetIndex = withoutDragged.findIndex((l) => l.id === overId);
+        const insertAt = targetIndex === -1 ? withoutDragged.length : targetIndex;
+        withoutDragged.splice(insertAt, 0, list);
+        db.reorderLists(withoutDragged.map((l) => l.id));
+        refreshLists(list.id);
+      }
+    },
+    [dragOverListId, refreshLists, stopAutoScroll]
+  );
 
   // ----- swipe-to-switch-list -----
 
@@ -234,28 +471,42 @@ export default function TodoSection() {
 
   return (
     <View style={styles.container}>
-      {/* Tab strip: one tab per list plus a "+" tab that creates or joins a list. */}
+      {/* Tab strip: one tab per list plus a "+" tab that creates or joins a list.
+          Enlarges while a task is being dragged so it's an easier drop target. */}
       <ScrollView
         horizontal
         showsHorizontalScrollIndicator={false}
-        style={styles.tabStrip}
+        ref={tabScrollViewRef}
+        onScroll={(e) => {
+          tabScrollXRef.current = e.nativeEvent.contentOffset.x;
+        }}
+        scrollEventThrottle={32}
+        style={[styles.tabStrip, draggingTaskId != null && styles.tabStripDragging]}
         contentContainerStyle={styles.tabStripContent}
       >
         {lists.map((list) => (
-          <Pressable
+          <ListTab
             key={list.id}
-            onPress={() => setActiveListId(list.id)}
-            onLongPress={() => openRename(list)}
-            style={[styles.tab, list.id === activeListId && styles.tabActive]}
-          >
-            <Text
-              style={[styles.tabText, list.id === activeListId && styles.tabTextActive]}
-              numberOfLines={1}
-            >
-              {list.shareKey ? '🔗 ' : ''}
-              {list.name}
-            </Text>
-          </Pressable>
+            ref={(r) => {
+              if (r) tabRefs.set(list.id, r);
+              else tabRefs.delete(list.id);
+            }}
+            list={list}
+            dragging={draggingListId === list.id}
+            dragHitSlop={draggingTaskId != null ? 12 : 0}
+            style={[
+              styles.tab,
+              list.id === activeListId && styles.tabActive,
+              draggingTaskId != null && list.id !== activeListId && styles.tabDropTarget,
+              dragOverListId === list.id && styles.tabDragOver,
+            ]}
+            textStyle={[styles.tabText, list.id === activeListId && styles.tabTextActive]}
+            onSelect={() => setActiveListId(list.id)}
+            onRename={() => openRename(list)}
+            onDragStart={handleListDragStart}
+            onDragMove={handleListDragMove}
+            onDragEnd={handleListDragEnd}
+          />
         ))}
         <Pressable onPress={openAddMenu} style={styles.tab} accessibilityLabel="Add list">
           <Text style={styles.plusTab}>+</Text>
@@ -288,25 +539,51 @@ export default function TodoSection() {
           </Pressable>
         </View>
 
-        <FlatList
-          data={tasks}
-          keyExtractor={(t) => String(t.id)}
-          renderItem={({ item }) => (
-            <TaskCard
-              task={item}
-              onToggleDone={toggleDone}
-              onEdit={(t) => {
-                setEditingTask(t);
-                setEditorVisible(true);
-              }}
-              onDelete={deleteTask}
-            />
-          )}
-          contentContainerStyle={styles.taskListContent}
-          ListEmptyComponent={
-            <Text style={styles.empty}>No tasks yet. Tap + to add one.</Text>
-          }
-        />
+        <View style={styles.taskListWrapper} ref={taskListContainerRef}>
+          <FlatList
+            data={tasks}
+            keyExtractor={(t) => String(t.id)}
+            scrollEnabled={draggingTaskId == null}
+            ref={taskListRef}
+            onScroll={(e) => {
+              taskScrollYRef.current = e.nativeEvent.contentOffset.y;
+            }}
+            scrollEventThrottle={32}
+            renderItem={({ item, index }) => (
+              <View
+                ref={(r) => {
+                  if (r) taskRefs.set(item.id, r);
+                  else taskRefs.delete(item.id);
+                }}
+                style={[
+                  dragOverIndex === index &&
+                    draggingTaskId != null &&
+                    draggingTaskId !== item.id &&
+                    styles.dropIndicatorAbove,
+                  draggingTaskId === item.id && styles.draggedRow,
+                ]}
+              >
+                <TaskCard
+                  task={item}
+                  dragging={draggingTaskId === item.id}
+                  onToggleDone={toggleDone}
+                  onEdit={(t) => {
+                    setEditingTask(t);
+                    setEditorVisible(true);
+                  }}
+                  onDelete={deleteTask}
+                  onDragStart={handleDragStart}
+                  onDragMove={handleDragMove}
+                  onDragEnd={handleDragEnd}
+                />
+              </View>
+            )}
+            contentContainerStyle={styles.taskListContent}
+            ListEmptyComponent={
+              <Text style={styles.empty}>No tasks yet. Tap + to add one.</Text>
+            }
+          />
+        </View>
       </View>
 
       <TaskEditorModal
@@ -419,6 +696,9 @@ const styles = StyleSheet.create({
     flexGrow: 0,
     backgroundColor: '#f2f0e8',
   },
+  tabStripDragging: {
+    paddingVertical: 4,
+  },
   tabStripContent: {
     paddingHorizontal: 8,
     paddingTop: 8,
@@ -435,6 +715,17 @@ const styles = StyleSheet.create({
   },
   tabActive: {
     backgroundColor: '#fffdf5',
+  },
+  tabDropTarget: {
+    paddingVertical: 18,
+    borderWidth: 2,
+    borderColor: 'rgba(26,95,180,0.35)',
+    borderStyle: 'dashed',
+  },
+  tabDragOver: {
+    backgroundColor: '#d6e6fb',
+    borderColor: '#1a5fb4',
+    borderStyle: 'solid',
   },
   tabText: {
     fontSize: 14,
@@ -488,9 +779,19 @@ const styles = StyleSheet.create({
     lineHeight: 26,
     fontWeight: 'bold',
   },
+  taskListWrapper: {
+    flex: 1,
+  },
   taskListContent: {
     paddingBottom: 24,
     paddingTop: 4,
+  },
+  dropIndicatorAbove: {
+    borderTopWidth: 3,
+    borderTopColor: '#1a5fb4',
+  },
+  draggedRow: {
+    zIndex: 10,
   },
   empty: {
     textAlign: 'center',

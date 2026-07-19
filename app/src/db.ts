@@ -64,6 +64,19 @@ export function initDb(): void {
     db.runSync('UPDATE shopping_items SET uuid = ? WHERE id = ?', generateUuid(), row.id);
   }
 
+  // Migration: explicit per-list task ordering (added to support drag-to-reorder).
+  ensureColumn('tasks', 'position', 'INTEGER NOT NULL DEFAULT 0');
+  if (getSetting('_migrated_task_positions') !== '1') {
+    for (const list of db.getAllSync<{ id: number }>('SELECT id FROM lists')) {
+      const rows = db.getAllSync<{ id: number }>(
+        'SELECT id FROM tasks WHERE list_id = ? ORDER BY done, due_date IS NULL, due_date, id',
+        list.id
+      );
+      rows.forEach((row, i) => db.runSync('UPDATE tasks SET position = ? WHERE id = ?', i, row.id));
+    }
+    setSetting('_migrated_task_positions', '1');
+  }
+
   // Start the user off with one list so the To Do section is never empty.
   const row = db.getFirstSync<{ n: number }>('SELECT COUNT(*) AS n FROM lists');
   if (!row || row.n === 0) {
@@ -165,6 +178,15 @@ export function renameList(id: number, name: string): void {
   db.runSync('UPDATE lists SET name = ? WHERE id = ?', name.trim(), id);
 }
 
+/** Persists a new list order (used by drag-to-reorder tabs in the UI). */
+export function reorderLists(orderedIds: number[]): void {
+  db.withTransactionSync(() => {
+    orderedIds.forEach((id, index) => {
+      db.runSync('UPDATE lists SET position = ? WHERE id = ?', index, id);
+    });
+  });
+}
+
 export function deleteList(id: number): void {
   db.runSync('DELETE FROM tasks WHERE list_id = ?', id);
   db.runSync('DELETE FROM lists WHERE id = ?', id);
@@ -182,6 +204,7 @@ interface TaskRow {
   color_index: number;
   done: number;
   created_at: string;
+  position: number;
 }
 
 function toTask(r: TaskRow): Task {
@@ -201,7 +224,7 @@ function toTask(r: TaskRow): Task {
 export function getTasks(listId: number): Task[] {
   return db
     .getAllSync<TaskRow>(
-      'SELECT * FROM tasks WHERE list_id = ? ORDER BY done, due_date IS NULL, due_date, id',
+      'SELECT * FROM tasks WHERE list_id = ? ORDER BY done, position, id',
       listId
     )
     .map(toTask);
@@ -218,14 +241,19 @@ export function createTask(
     'SELECT COUNT(*) AS n FROM tasks WHERE list_id = ?',
     listId
   )!.n % 8;
+  const position = db.getFirstSync<{ p: number }>(
+    'SELECT COALESCE(MAX(position), -1) + 1 AS p FROM tasks WHERE list_id = ?',
+    listId
+  )!.p;
   db.runSync(
-    'INSERT INTO tasks (list_id, uuid, title, description, due_date, color_index) VALUES (?, ?, ?, ?, ?, ?)',
+    'INSERT INTO tasks (list_id, uuid, title, description, due_date, color_index, position) VALUES (?, ?, ?, ?, ?, ?, ?)',
     listId,
     generateUuid(),
     title.trim(),
     description.trim(),
     dueDate,
-    colorIndex
+    colorIndex,
+    position
   );
 }
 
@@ -246,6 +274,30 @@ export function updateTask(
 
 export function setTaskDone(id: number, done: boolean): void {
   db.runSync('UPDATE tasks SET done = ? WHERE id = ?', done ? 1 : 0, id);
+}
+
+/** Moves a task to a different list (used by drag-and-drop in the UI); it is
+ *  appended to the end of the destination list. */
+export function moveTaskToList(id: number, newListId: number): void {
+  const position = db.getFirstSync<{ p: number }>(
+    'SELECT COALESCE(MAX(position), -1) + 1 AS p FROM tasks WHERE list_id = ?',
+    newListId
+  )!.p;
+  db.runSync(
+    'UPDATE tasks SET list_id = ?, position = ? WHERE id = ?',
+    newListId,
+    position,
+    id
+  );
+}
+
+/** Persists a new task order within a list (used by drag-to-reorder in the UI). */
+export function reorderTasks(listId: number, orderedIds: number[]): void {
+  db.withTransactionSync(() => {
+    orderedIds.forEach((id, index) => {
+      db.runSync('UPDATE tasks SET position = ? WHERE id = ? AND list_id = ?', index, id, listId);
+    });
+  });
 }
 
 export function deleteTask(id: number): void {
@@ -297,24 +349,26 @@ export function applySyncedTasks(listId: number, items: SyncTaskItem[]): void {
       const colorIndex = Number.isFinite(item.colorIndex) ? item.colorIndex : index % 8;
       if (existingId != null) {
         db.runSync(
-          'UPDATE tasks SET title = ?, description = ?, due_date = ?, color_index = ?, done = ? WHERE id = ?',
+          'UPDATE tasks SET title = ?, description = ?, due_date = ?, color_index = ?, done = ?, position = ? WHERE id = ?',
           item.title,
           item.description,
           item.dueDate,
           colorIndex,
           item.done ? 1 : 0,
+          index,
           existingId
         );
       } else {
         db.runSync(
-          'INSERT INTO tasks (list_id, uuid, title, description, due_date, color_index, done) VALUES (?, ?, ?, ?, ?, ?, ?)',
+          'INSERT INTO tasks (list_id, uuid, title, description, due_date, color_index, done, position) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
           listId,
           item.uuid,
           item.title,
           item.description,
           item.dueDate,
           colorIndex,
-          item.done ? 1 : 0
+          item.done ? 1 : 0,
+          index
         );
       }
     });
