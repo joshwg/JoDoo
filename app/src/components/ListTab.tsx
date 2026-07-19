@@ -79,7 +79,7 @@ const ListTab = forwardRef<View, Props>(function ListTab(
       ref={ref}
       style={[style, styles.container, dragging && styles.dragging, { transform: pan.getTranslateTransform() }]}
     >
-      <View {...panResponder.panHandlers} style={styles.handle} hitSlop={8} accessibilityLabel="Drag to reorder list">
+      <View {...panResponder.panHandlers} style={styles.handle} hitSlop={12} accessibilityLabel="Drag to reorder list">
         <Text style={styles.handleIcon}>⋮</Text>
       </View>
       <Pressable onPress={onSelect} onLongPress={onRename} hitSlop={dragHitSlop} style={styles.pressable}>
@@ -109,10 +109,15 @@ const styles = StyleSheet.create({
     zIndex: 10,
   },
   handle: {
-    paddingRight: 2,
+    minWidth: 32,
+    minHeight: 32,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 4,
   },
   handleIcon: {
-    fontSize: 14,
+    fontSize: 22,
+    lineHeight: 22,
     color: 'rgba(0,0,0,0.35)',
   },
   pressable: {
