@@ -2,7 +2,9 @@ import React, { useCallback, useEffect, useState } from 'react';
 import {
   Alert,
   FlatList,
+  KeyboardAvoidingView,
   Modal,
+  Platform,
   Pressable,
   StyleSheet,
   Text,
@@ -129,7 +131,10 @@ export default function DictionaryModal({ visible, onClose }: Props) {
           animationType="fade"
           onRequestClose={() => setEditing(null)}
         >
-          <View style={styles.backdrop}>
+          <KeyboardAvoidingView
+            style={styles.backdrop}
+            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          >
             <View style={styles.editSheet}>
               <Text style={styles.editHeading}>Edit entry</Text>
               <TextInput
@@ -148,7 +153,7 @@ export default function DictionaryModal({ visible, onClose }: Props) {
                 </Pressable>
               </View>
             </View>
-          </View>
+          </KeyboardAvoidingView>
         </Modal>
       </View>
     </Modal>

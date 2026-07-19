@@ -1,7 +1,9 @@
 import DateTimePicker from '@react-native-community/datetimepicker';
 import React, { useEffect, useState } from 'react';
 import {
+  KeyboardAvoidingView,
   Modal,
+  Platform,
   Pressable,
   StyleSheet,
   Text,
@@ -39,7 +41,10 @@ export default function TaskEditorModal({ visible, task, onSave, onCancel }: Pro
 
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={onCancel}>
-      <View style={styles.backdrop}>
+      <KeyboardAvoidingView
+        style={styles.backdrop}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      >
         <View style={styles.sheet}>
           <Text style={styles.heading}>{task ? 'Edit Task' : 'New Task'}</Text>
 
@@ -99,7 +104,7 @@ export default function TaskEditorModal({ visible, task, onSave, onCancel }: Pro
             </Pressable>
           </View>
         </View>
-      </View>
+      </KeyboardAvoidingView>
     </Modal>
   );
 }

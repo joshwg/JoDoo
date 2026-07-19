@@ -3,8 +3,10 @@ import {
   ActivityIndicator,
   Alert,
   FlatList,
+  KeyboardAvoidingView,
   Modal,
   PanResponder,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -325,43 +327,45 @@ export default function TodoSection() {
         onRequestClose={() => setRenamingList(null)}
       >
         <View style={styles.backdrop}>
-          <View style={styles.renameSheet}>
-            <Text style={styles.renameHeading}>Rename list</Text>
-            <TextInput
-              style={styles.renameInput}
-              value={renameText}
-              onChangeText={setRenameText}
-              autoFocus
-              selectTextOnFocus
-            />
-            {renamingList?.shareKey && <Text style={styles.sharedNote}>🔗 This list is shared</Text>}
-            {shareBusy && <ActivityIndicator style={styles.renameSpinner} />}
-            <View style={styles.renameActions}>
-              <Pressable
-                onPress={() => renamingList && confirmDeleteList(renamingList)}
-                style={styles.renameButton}
-                disabled={shareBusy}
-              >
-                <Text style={styles.deleteText}>Delete</Text>
-              </Pressable>
-              <Pressable
-                onPress={() => renamingList && shareList(renamingList)}
-                style={styles.renameButton}
-                disabled={shareBusy}
-              >
-                <Text style={styles.shareText}>
-                  {renamingList?.shareKey ? 'View Key' : 'Share'}
-                </Text>
-              </Pressable>
-              <View style={styles.renameSpacer} />
-              <Pressable onPress={() => setRenamingList(null)} style={styles.renameButton}>
-                <Text style={styles.cancelText}>Cancel</Text>
-              </Pressable>
-              <Pressable onPress={commitRename} style={styles.renameButton}>
-                <Text style={styles.saveText}>Save</Text>
-              </Pressable>
+          <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+            <View style={styles.renameSheet}>
+              <Text style={styles.renameHeading}>Rename list</Text>
+              <TextInput
+                style={styles.renameInput}
+                value={renameText}
+                onChangeText={setRenameText}
+                autoFocus
+                selectTextOnFocus
+              />
+              {renamingList?.shareKey && <Text style={styles.sharedNote}>🔗 This list is shared</Text>}
+              {shareBusy && <ActivityIndicator style={styles.renameSpinner} />}
+              <View style={styles.renameActions}>
+                <Pressable
+                  onPress={() => renamingList && confirmDeleteList(renamingList)}
+                  style={styles.renameButton}
+                  disabled={shareBusy}
+                >
+                  <Text style={styles.deleteText}>Delete</Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => renamingList && shareList(renamingList)}
+                  style={styles.renameButton}
+                  disabled={shareBusy}
+                >
+                  <Text style={styles.shareText}>
+                    {renamingList?.shareKey ? 'View Key' : 'Share'}
+                  </Text>
+                </Pressable>
+                <View style={styles.renameSpacer} />
+                <Pressable onPress={() => setRenamingList(null)} style={styles.renameButton}>
+                  <Text style={styles.cancelText}>Cancel</Text>
+                </Pressable>
+                <Pressable onPress={commitRename} style={styles.renameButton}>
+                  <Text style={styles.saveText}>Save</Text>
+                </Pressable>
+              </View>
             </View>
-          </View>
+          </KeyboardAvoidingView>
         </View>
       </Modal>
 
