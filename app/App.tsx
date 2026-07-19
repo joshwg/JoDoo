@@ -1,6 +1,6 @@
 import { StatusBar } from 'expo-status-bar';
-import React, { useMemo, useState } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import React, { useMemo, useRef, useState } from 'react';
+import { PanResponder, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import * as db from './src/db';
 import ShoppingSection from './src/components/ShoppingSection';
@@ -8,16 +8,33 @@ import TodoSection from './src/components/TodoSection';
 
 type Section = 'todo' | 'shopping';
 
+const SWIPE_THRESHOLD = 50;
+
 export default function App() {
   // Open/create the database once, before first render of either section.
   useMemo(() => db.initDb(), []);
   const [section, setSection] = useState<Section>('todo');
 
+  // A two-finger horizontal swipe toggles between the To Do and Shopping sections.
+  const panResponder = useRef(
+    PanResponder.create({
+      onMoveShouldSetPanResponder: (evt, gestureState) =>
+        evt.nativeEvent.touches.length === 2 &&
+        Math.abs(gestureState.dx) > 20 &&
+        Math.abs(gestureState.dx) > Math.abs(gestureState.dy) * 1.5,
+      onPanResponderRelease: (_evt, gestureState) => {
+        if (Math.abs(gestureState.dx) >= SWIPE_THRESHOLD) {
+          setSection((current) => (current === 'todo' ? 'shopping' : 'todo'));
+        }
+      },
+    }),
+  ).current;
+
   return (
     <SafeAreaProvider>
       <SafeAreaView style={styles.root} edges={['top', 'bottom']}>
         <StatusBar style="dark" />
-        <View style={styles.content}>
+        <View style={styles.content} {...panResponder.panHandlers}>
           {section === 'todo' ? <TodoSection /> : <ShoppingSection />}
         </View>
         <View style={styles.bottomBar}>

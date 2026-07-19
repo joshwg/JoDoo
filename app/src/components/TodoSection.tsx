@@ -1,8 +1,9 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Alert,
   FlatList,
   Modal,
+  PanResponder,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -46,6 +47,47 @@ export default function TodoSection() {
   }, [activeListId, refreshTasks]);
 
   const activeList = lists.find((l) => l.id === activeListId) ?? null;
+
+  // ----- swipe-to-switch-list -----
+
+  // Keep refs in sync so the PanResponder (created once) always sees fresh data.
+  const listsRef = useRef(lists);
+  useEffect(() => {
+    listsRef.current = lists;
+  }, [lists]);
+  const activeListIdRef = useRef(activeListId);
+  useEffect(() => {
+    activeListIdRef.current = activeListId;
+  }, [activeListId]);
+
+  const switchListByOffset = useCallback((offset: number) => {
+    const currentLists = listsRef.current;
+    if (currentLists.length < 2) return;
+    const currentIndex = currentLists.findIndex((l) => l.id === activeListIdRef.current);
+    const baseIndex = currentIndex === -1 ? 0 : currentIndex;
+    // Wrap around in both directions, e.g. sliding past the last list rolls back to the first.
+    const nextIndex = (baseIndex + offset + currentLists.length) % currentLists.length;
+    setActiveListId(currentLists[nextIndex].id);
+  }, []);
+
+  const SWIPE_THRESHOLD = 50;
+  const panResponder = useRef(
+    PanResponder.create({
+      // Only claim single-finger drags, so a two-finger swipe (which switches
+      // between the To Do / Shopping sections) is left for the parent to handle.
+      onMoveShouldSetPanResponder: (evt, gestureState) =>
+        evt.nativeEvent.touches.length === 1 &&
+        Math.abs(gestureState.dx) > 20 &&
+        Math.abs(gestureState.dx) > Math.abs(gestureState.dy) * 1.5,
+      onPanResponderRelease: (_evt, gestureState) => {
+        if (gestureState.dx <= -SWIPE_THRESHOLD) {
+          switchListByOffset(1); // swipe left -> next list
+        } else if (gestureState.dx >= SWIPE_THRESHOLD) {
+          switchListByOffset(-1); // swipe right -> previous list
+        }
+      },
+    }),
+  ).current;
 
   // ----- tab actions -----
 
@@ -144,42 +186,44 @@ export default function TodoSection() {
         </Pressable>
       </ScrollView>
 
-      {/* Header with the "+" button at the top of the list for new tasks. */}
-      <View style={styles.listHeader}>
-        <Text style={styles.listTitle} numberOfLines={1}>
-          {activeList?.name ?? ''}
-        </Text>
-        <Pressable
-          onPress={() => {
-            setEditingTask(null);
-            setEditorVisible(true);
-          }}
-          style={styles.addTaskButton}
-          accessibilityLabel="Add task"
-        >
-          <Text style={styles.addTaskPlus}>+</Text>
-        </Pressable>
-      </View>
-
-      <FlatList
-        data={tasks}
-        keyExtractor={(t) => String(t.id)}
-        renderItem={({ item }) => (
-          <TaskCard
-            task={item}
-            onToggleDone={toggleDone}
-            onEdit={(t) => {
-              setEditingTask(t);
+      {/* Header + task list: a one-finger horizontal slide here switches lists. */}
+      <View style={styles.swipeArea} {...panResponder.panHandlers}>
+        <View style={styles.listHeader}>
+          <Text style={styles.listTitle} numberOfLines={1}>
+            {activeList?.name ?? ''}
+          </Text>
+          <Pressable
+            onPress={() => {
+              setEditingTask(null);
               setEditorVisible(true);
             }}
-            onDelete={deleteTask}
-          />
-        )}
-        contentContainerStyle={styles.taskListContent}
-        ListEmptyComponent={
-          <Text style={styles.empty}>No tasks yet. Tap + to add one.</Text>
-        }
-      />
+            style={styles.addTaskButton}
+            accessibilityLabel="Add task"
+          >
+            <Text style={styles.addTaskPlus}>+</Text>
+          </Pressable>
+        </View>
+
+        <FlatList
+          data={tasks}
+          keyExtractor={(t) => String(t.id)}
+          renderItem={({ item }) => (
+            <TaskCard
+              task={item}
+              onToggleDone={toggleDone}
+              onEdit={(t) => {
+                setEditingTask(t);
+                setEditorVisible(true);
+              }}
+              onDelete={deleteTask}
+            />
+          )}
+          contentContainerStyle={styles.taskListContent}
+          ListEmptyComponent={
+            <Text style={styles.empty}>No tasks yet. Tap + to add one.</Text>
+          }
+        />
+      </View>
 
       <TaskEditorModal
         visible={editorVisible}
@@ -267,6 +311,9 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: 'bold',
     color: '#555',
+  },
+  swipeArea: {
+    flex: 1,
   },
   listHeader: {
     flexDirection: 'row',
