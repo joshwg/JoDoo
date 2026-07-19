@@ -1,8 +1,18 @@
 import * as SQLite from 'expo-sqlite';
 import { SEED_FOOD_ITEMS } from './foodItems';
 import { DictionaryEntry, ShoppingItem, Task, TodoList } from './types';
+import { generateUuid } from './uuid';
 
 const db = SQLite.openDatabaseSync('jodoo.db');
+
+/** Adds `column` to `table` if it isn't already there (SQLite has no
+ *  "ADD COLUMN IF NOT EXISTS", so we check PRAGMA table_info first). */
+function ensureColumn(table: string, column: string, definition: string): void {
+  const cols = db.getAllSync<{ name: string }>(`PRAGMA table_info(${table})`);
+  if (!cols.some((c) => c.name === column)) {
+    db.execSync(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+}
 
 export function initDb(): void {
   db.execSync(`
@@ -34,7 +44,26 @@ export function initDb(): void {
       name_lower TEXT NOT NULL UNIQUE,
       uses INTEGER NOT NULL DEFAULT 0
     );
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
   `);
+
+  // Migrations for list/task sharing support (added after first release).
+  ensureColumn('lists', 'share_key', 'TEXT');
+  ensureColumn('tasks', 'uuid', 'TEXT');
+  ensureColumn('shopping_items', 'uuid', 'TEXT');
+  // Backfill any pre-existing rows that predate the uuid column.
+  for (const row of db.getAllSync<{ id: number }>('SELECT id FROM tasks WHERE uuid IS NULL')) {
+    db.runSync('UPDATE tasks SET uuid = ? WHERE id = ?', generateUuid(), row.id);
+  }
+  for (const row of db.getAllSync<{ id: number }>(
+    'SELECT id FROM shopping_items WHERE uuid IS NULL'
+  )) {
+    db.runSync('UPDATE shopping_items SET uuid = ? WHERE id = ?', generateUuid(), row.id);
+  }
+
   // Start the user off with one list so the To Do section is never empty.
   const row = db.getFirstSync<{ n: number }>('SELECT COUNT(*) AS n FROM lists');
   if (!row || row.n === 0) {
@@ -55,16 +84,41 @@ export function initDb(): void {
   }
 }
 
+// ---------- Settings (simple key/value config, e.g. the shopping share key) ----------
+
+export function getSetting(key: string): string | null {
+  const row = db.getFirstSync<{ value: string }>('SELECT value FROM settings WHERE key = ?', key);
+  return row ? row.value : null;
+}
+
+export function setSetting(key: string, value: string): void {
+  db.runSync(
+    'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+    key,
+    value
+  );
+}
+
+export function deleteSetting(key: string): void {
+  db.runSync('DELETE FROM settings WHERE key = ?', key);
+}
+
+
 // ---------- Lists ----------
 
 interface ListRow {
   id: number;
   name: string;
   position: number;
+  share_key: string | null;
+}
+
+function toTodoList(r: ListRow): TodoList {
+  return { id: r.id, name: r.name, position: r.position, shareKey: r.share_key };
 }
 
 export function getLists(): TodoList[] {
-  return db.getAllSync<ListRow>('SELECT * FROM lists ORDER BY position, id');
+  return db.getAllSync<ListRow>('SELECT * FROM lists ORDER BY position, id').map(toTodoList);
 }
 
 /**
@@ -84,7 +138,27 @@ export function createList(): TodoList {
     'SELECT COALESCE(MAX(position), 0) + 1 AS p FROM lists'
   )!.p;
   const res = db.runSync('INSERT INTO lists (name, position) VALUES (?, ?)', name, pos);
-  return { id: Number(res.lastInsertRowId), name, position: pos };
+  return { id: Number(res.lastInsertRowId), name, position: pos, shareKey: null };
+}
+
+/** Creates a new list that is already bound to a server share (used when
+ *  joining another user's shared todo list via its secret key). */
+export function createJoinedList(name: string, shareKey: string): TodoList {
+  const pos = db.getFirstSync<{ p: number }>(
+    'SELECT COALESCE(MAX(position), 0) + 1 AS p FROM lists'
+  )!.p;
+  const res = db.runSync(
+    'INSERT INTO lists (name, position, share_key) VALUES (?, ?, ?)',
+    name,
+    pos,
+    shareKey
+  );
+  return { id: Number(res.lastInsertRowId), name, position: pos, shareKey };
+}
+
+/** Marks an existing list as shared once the owner has generated a key for it. */
+export function setListShareKey(id: number, shareKey: string): void {
+  db.runSync('UPDATE lists SET share_key = ? WHERE id = ?', shareKey, id);
 }
 
 export function renameList(id: number, name: string): void {
@@ -101,6 +175,7 @@ export function deleteList(id: number): void {
 interface TaskRow {
   id: number;
   list_id: number;
+  uuid: string;
   title: string;
   description: string;
   due_date: string | null;
@@ -113,6 +188,7 @@ function toTask(r: TaskRow): Task {
   return {
     id: r.id,
     listId: r.list_id,
+    uuid: r.uuid,
     title: r.title,
     description: r.description,
     dueDate: r.due_date,
@@ -143,8 +219,9 @@ export function createTask(
     listId
   )!.n % 8;
   db.runSync(
-    'INSERT INTO tasks (list_id, title, description, due_date, color_index) VALUES (?, ?, ?, ?, ?)',
+    'INSERT INTO tasks (list_id, uuid, title, description, due_date, color_index) VALUES (?, ?, ?, ?, ?, ?)',
     listId,
+    generateUuid(),
     title.trim(),
     description.trim(),
     dueDate,
@@ -175,10 +252,85 @@ export function deleteTask(id: number): void {
   db.runSync('DELETE FROM tasks WHERE id = ?', id);
 }
 
+// ---------- Sync: todo list snapshot export/apply ----------
+
+/** Plain-object shape sent to / received from the sync server for a task. */
+export interface SyncTaskItem {
+  uuid: string;
+  title: string;
+  description: string;
+  dueDate: string | null;
+  colorIndex: number;
+  done: boolean;
+}
+
+/** The current contents of a list, shaped for pushing to the sync server. */
+export function getTasksAsSyncItems(listId: number): SyncTaskItem[] {
+  return getTasks(listId).map((t) => ({
+    uuid: t.uuid,
+    title: t.title,
+    description: t.description,
+    dueDate: t.dueDate,
+    colorIndex: t.colorIndex,
+    done: t.done,
+  }));
+}
+
+/**
+ * Replaces a list's tasks with a snapshot received from the sync server.
+ * Tasks are matched by `uuid`: known uuids are updated in place, unknown
+ * ones are inserted, and local tasks whose uuid is missing from the
+ * snapshot are deleted (the server always sends the whole list).
+ */
+export function applySyncedTasks(listId: number, items: SyncTaskItem[]): void {
+  db.withTransactionSync(() => {
+    const existing = db.getAllSync<{ id: number; uuid: string }>(
+      'SELECT id, uuid FROM tasks WHERE list_id = ?',
+      listId
+    );
+    const byUuid = new Map(existing.map((e) => [e.uuid, e.id]));
+    const seen = new Set<string>();
+    items.forEach((item, index) => {
+      if (!item.uuid) return;
+      seen.add(item.uuid);
+      const existingId = byUuid.get(item.uuid);
+      const colorIndex = Number.isFinite(item.colorIndex) ? item.colorIndex : index % 8;
+      if (existingId != null) {
+        db.runSync(
+          'UPDATE tasks SET title = ?, description = ?, due_date = ?, color_index = ?, done = ? WHERE id = ?',
+          item.title,
+          item.description,
+          item.dueDate,
+          colorIndex,
+          item.done ? 1 : 0,
+          existingId
+        );
+      } else {
+        db.runSync(
+          'INSERT INTO tasks (list_id, uuid, title, description, due_date, color_index, done) VALUES (?, ?, ?, ?, ?, ?, ?)',
+          listId,
+          item.uuid,
+          item.title,
+          item.description,
+          item.dueDate,
+          colorIndex,
+          item.done ? 1 : 0
+        );
+      }
+    });
+    for (const e of existing) {
+      if (!seen.has(e.uuid)) {
+        db.runSync('DELETE FROM tasks WHERE id = ?', e.id);
+      }
+    }
+  });
+}
+
 // ---------- Shopping ----------
 
 interface ShoppingRow {
   id: number;
+  uuid: string;
   name: string;
   checked: number;
   position: number;
@@ -187,14 +339,25 @@ interface ShoppingRow {
 export function getShoppingItems(): ShoppingItem[] {
   return db
     .getAllSync<ShoppingRow>('SELECT * FROM shopping_items ORDER BY checked, position, id')
-    .map((r) => ({ id: r.id, name: r.name, checked: r.checked === 1, position: r.position }));
+    .map((r) => ({
+      id: r.id,
+      uuid: r.uuid,
+      name: r.name,
+      checked: r.checked === 1,
+      position: r.position,
+    }));
 }
 
 export function addShoppingItem(name: string): void {
   const pos = db.getFirstSync<{ p: number }>(
     'SELECT COALESCE(MAX(position), 0) + 1 AS p FROM shopping_items'
   )!.p;
-  db.runSync('INSERT INTO shopping_items (name, position) VALUES (?, ?)', name.trim(), pos);
+  db.runSync(
+    'INSERT INTO shopping_items (name, uuid, position) VALUES (?, ?, ?)',
+    name.trim(),
+    generateUuid(),
+    pos
+  );
 }
 
 export function setShoppingChecked(id: number, checked: boolean): void {
@@ -208,6 +371,64 @@ export function deleteShoppingItem(id: number): void {
 export function clearCheckedShoppingItems(): void {
   db.runSync('DELETE FROM shopping_items WHERE checked = 1');
 }
+
+// ---------- Sync: shopping list snapshot export/apply ----------
+
+export interface SyncShoppingItem {
+  uuid: string;
+  name: string;
+  checked: boolean;
+}
+
+export function getShoppingItemsAsSyncItems(): SyncShoppingItem[] {
+  return getShoppingItems().map((i) => ({ uuid: i.uuid, name: i.name, checked: i.checked }));
+}
+
+/** Same reconciliation strategy as {@link applySyncedTasks}, for the single
+ *  shopping list. */
+export function applySyncedShoppingItems(items: SyncShoppingItem[]): void {
+  db.withTransactionSync(() => {
+    const existing = db.getAllSync<{ id: number; uuid: string }>(
+      'SELECT id, uuid FROM shopping_items'
+    );
+    const byUuid = new Map(existing.map((e) => [e.uuid, e.id]));
+    const seen = new Set<string>();
+    items.forEach((item, index) => {
+      if (!item.uuid) return;
+      seen.add(item.uuid);
+      const existingId = byUuid.get(item.uuid);
+      if (existingId != null) {
+        db.runSync(
+          'UPDATE shopping_items SET name = ?, checked = ?, position = ? WHERE id = ?',
+          item.name,
+          item.checked ? 1 : 0,
+          index,
+          existingId
+        );
+      } else {
+        db.runSync(
+          'INSERT INTO shopping_items (name, uuid, checked, position) VALUES (?, ?, ?, ?)',
+          item.name,
+          item.uuid,
+          item.checked ? 1 : 0,
+          index
+        );
+      }
+    });
+    for (const e of existing) {
+      if (!seen.has(e.uuid)) {
+        db.runSync('DELETE FROM shopping_items WHERE id = ?', e.id);
+      }
+    }
+  });
+}
+
+/** Deletes every local shopping item; used right before adopting someone
+ *  else's shared shopping list via its key. */
+export function clearAllShoppingItems(): void {
+  db.runSync('DELETE FROM shopping_items');
+}
+
 
 // ---------- Autocomplete dictionary ----------
 

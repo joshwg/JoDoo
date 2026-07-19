@@ -1,5 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
+  ActivityIndicator,
+  Alert,
   FlatList,
   Modal,
   Pressable,
@@ -10,8 +12,18 @@ import {
 } from 'react-native';
 import { APP_NAME, APP_VERSION, BUILD_DATE, COPYRIGHT } from '../appInfo';
 import * as db from '../db';
+import { subscribeRemoteUpdate } from '../remoteUpdates';
+import { createShare, fetchShare } from '../syncClient';
+import {
+  pushShoppingIfShared,
+  refreshSyncConnections,
+  SHOPPING_SHARE_KEY_SETTING,
+} from '../syncManager';
 import { DictionaryEntry, ShoppingItem } from '../types';
 import DictionaryModal from './DictionaryModal';
+import EnterKeyModal from './EnterKeyModal';
+import ServerSettingsModal from './ServerSettingsModal';
+import ShareKeyModal from './ShareKeyModal';
 
 export default function ShoppingSection() {
   const [items, setItems] = useState<ShoppingItem[]>([]);
@@ -20,12 +32,25 @@ export default function ShoppingSection() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [dictionaryOpen, setDictionaryOpen] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
+  const [joinVisible, setJoinVisible] = useState(false);
+  const [serverSettingsVisible, setServerSettingsVisible] = useState(false);
+  const [shareKeyShown, setShareKeyShown] = useState<string | null>(null);
+  const [shareBusy, setShareBusy] = useState(false);
 
   const refresh = useCallback(() => setItems(db.getShoppingItems()), []);
 
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  // Live-refresh when another peer updates the shared shopping list.
+  useEffect(
+    () =>
+      subscribeRemoteUpdate((target) => {
+        if (target.type === 'shopping') refresh();
+      }),
+    [refresh]
+  );
 
   const changeInput = (text: string) => {
     setNewItem(text);
@@ -41,6 +66,45 @@ export default function ShoppingSection() {
     setNewItem('');
     setSuggestions([]);
     refresh();
+    pushShoppingIfShared();
+  };
+
+  const shareShoppingList = async () => {
+    const existingKey = db.getSetting(SHOPPING_SHARE_KEY_SETTING);
+    if (existingKey) {
+      setMenuOpen(false);
+      setShareKeyShown(existingKey);
+      return;
+    }
+    setShareBusy(true);
+    try {
+      const snapshot = await createShare(
+        'shopping',
+        'Shopping',
+        db.getShoppingItemsAsSyncItems() as unknown as Record<string, unknown>[]
+      );
+      db.setSetting(SHOPPING_SHARE_KEY_SETTING, snapshot.key);
+      await refreshSyncConnections();
+      setMenuOpen(false);
+      setShareKeyShown(snapshot.key);
+    } catch (err) {
+      Alert.alert('Could not share list', err instanceof Error ? err.message : String(err));
+    } finally {
+      setShareBusy(false);
+    }
+  };
+
+  const joinSharedShoppingList = async (key: string) => {
+    const snapshot = await fetchShare(key);
+    if (snapshot.kind !== 'shopping') {
+      throw new Error('That key belongs to a todo list, not the shopping list.');
+    }
+    db.clearAllShoppingItems();
+    db.applySyncedShoppingItems(snapshot.items as unknown as db.SyncShoppingItem[]);
+    db.setSetting(SHOPPING_SHARE_KEY_SETTING, key);
+    refresh();
+    await refreshSyncConnections();
+    setJoinVisible(false);
   };
 
   const hasChecked = items.some((i) => i.checked);
@@ -103,6 +167,7 @@ export default function ShoppingSection() {
               onPress={() => {
                 db.setShoppingChecked(item.id, !item.checked);
                 refresh();
+                pushShoppingIfShared();
               }}
             >
               <View style={[styles.checkbox, item.checked && styles.checkboxChecked]}>
@@ -116,6 +181,7 @@ export default function ShoppingSection() {
               onPress={() => {
                 db.deleteShoppingItem(item.id);
                 refresh();
+                pushShoppingIfShared();
               }}
               hitSlop={8}
               accessibilityLabel="Delete item"
@@ -135,6 +201,7 @@ export default function ShoppingSection() {
           onPress={() => {
             db.clearCheckedShoppingItems();
             refresh();
+            pushShoppingIfShared();
           }}
           style={styles.clearButton}
         >
@@ -161,6 +228,32 @@ export default function ShoppingSection() {
               <Text style={styles.menuText}>Dictionary</Text>
             </Pressable>
             <View style={styles.menuDivider} />
+            <Pressable style={styles.menuItem} onPress={shareShoppingList} disabled={shareBusy}>
+              <Text style={styles.menuText}>
+                {db.getSetting(SHOPPING_SHARE_KEY_SETTING) ? 'View Share Key' : 'Share This List'}
+              </Text>
+            </Pressable>
+            <View style={styles.menuDivider} />
+            <Pressable
+              style={styles.menuItem}
+              onPress={() => {
+                setMenuOpen(false);
+                setJoinVisible(true);
+              }}
+            >
+              <Text style={styles.menuText}>Join Shared List</Text>
+            </Pressable>
+            <View style={styles.menuDivider} />
+            <Pressable
+              style={styles.menuItem}
+              onPress={() => {
+                setMenuOpen(false);
+                setServerSettingsVisible(true);
+              }}
+            >
+              <Text style={styles.menuText}>Server Settings</Text>
+            </Pressable>
+            <View style={styles.menuDivider} />
             <Pressable
               style={styles.menuItem}
               onPress={() => {
@@ -175,6 +268,25 @@ export default function ShoppingSection() {
       </Modal>
 
       <DictionaryModal visible={dictionaryOpen} onClose={() => setDictionaryOpen(false)} />
+
+      <EnterKeyModal
+        visible={joinVisible}
+        title="Join Shared List"
+        body="This replaces your current shopping list with the shared one and keeps them in sync."
+        onCancel={() => setJoinVisible(false)}
+        onSubmit={joinSharedShoppingList}
+      />
+
+      <ShareKeyModal
+        visible={shareKeyShown != null}
+        shareKey={shareKeyShown}
+        onClose={() => setShareKeyShown(null)}
+      />
+
+      <ServerSettingsModal
+        visible={serverSettingsVisible}
+        onClose={() => setServerSettingsVisible(false)}
+      />
 
       {/* About */}
       <Modal

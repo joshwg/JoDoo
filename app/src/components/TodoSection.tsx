@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  ActivityIndicator,
   Alert,
   FlatList,
   Modal,
@@ -12,7 +13,13 @@ import {
   View,
 } from 'react-native';
 import * as db from '../db';
+import { subscribeRemoteUpdate } from '../remoteUpdates';
+import { createShare, fetchShare } from '../syncClient';
+import { pushTodoListIfShared, refreshSyncConnections } from '../syncManager';
 import { Task, TodoList } from '../types';
+import EnterKeyModal from './EnterKeyModal';
+import ServerSettingsModal from './ServerSettingsModal';
+import ShareKeyModal from './ShareKeyModal';
 import TaskCard from './TaskCard';
 import TaskEditorModal from './TaskEditorModal';
 
@@ -24,6 +31,11 @@ export default function TodoSection() {
   const [editingTask, setEditingTask] = useState<Task | null>(null);
   const [renamingList, setRenamingList] = useState<TodoList | null>(null);
   const [renameText, setRenameText] = useState('');
+  const [addMenuVisible, setAddMenuVisible] = useState(false);
+  const [joinVisible, setJoinVisible] = useState(false);
+  const [serverSettingsVisible, setServerSettingsVisible] = useState(false);
+  const [shareBusy, setShareBusy] = useState(false);
+  const [shareKeyShown, setShareKeyShown] = useState<string | null>(null);
 
   const refreshLists = useCallback((preferId?: number) => {
     const all = db.getLists();
@@ -45,6 +57,17 @@ export default function TodoSection() {
   useEffect(() => {
     refreshTasks(activeListId);
   }, [activeListId, refreshTasks]);
+
+  // Live-refresh when another peer updates a shared list we're viewing.
+  useEffect(
+    () =>
+      subscribeRemoteUpdate((target) => {
+        if (target.type !== 'todo') return;
+        refreshLists();
+        refreshTasks(activeListId);
+      }),
+    [refreshLists, refreshTasks, activeListId]
+  );
 
   const activeList = lists.find((l) => l.id === activeListId) ?? null;
 
@@ -96,6 +119,30 @@ export default function TodoSection() {
     refreshLists(created.id);
   };
 
+  const openAddMenu = () => setAddMenuVisible(true);
+
+  const startNewList = () => {
+    setAddMenuVisible(false);
+    addList();
+  };
+
+  const startJoinList = () => {
+    setAddMenuVisible(false);
+    setJoinVisible(true);
+  };
+
+  const joinSharedList = async (key: string) => {
+    const snapshot = await fetchShare(key);
+    if (snapshot.kind !== 'todo') {
+      throw new Error('That key belongs to a shopping list, not a todo list.');
+    }
+    const created = db.createJoinedList(snapshot.name || 'Shared List', key);
+    db.applySyncedTasks(created.id, snapshot.items as unknown as db.SyncTaskItem[]);
+    refreshLists(created.id);
+    await refreshSyncConnections();
+    setJoinVisible(false);
+  };
+
   const openRename = (list: TodoList) => {
     setRenamingList(list);
     setRenameText(list.name);
@@ -104,9 +151,31 @@ export default function TodoSection() {
   const commitRename = () => {
     if (renamingList && renameText.trim()) {
       db.renameList(renamingList.id, renameText);
+      pushTodoListIfShared(renamingList.id);
       refreshLists();
     }
     setRenamingList(null);
+  };
+
+  const shareList = async (list: TodoList) => {
+    if (list.shareKey) {
+      setRenamingList(null);
+      setShareKeyShown(list.shareKey);
+      return;
+    }
+    setShareBusy(true);
+    try {
+      const snapshot = await createShare('todo', list.name, db.getTasksAsSyncItems(list.id) as unknown as Record<string, unknown>[]);
+      db.setListShareKey(list.id, snapshot.key);
+      refreshLists();
+      await refreshSyncConnections();
+      setRenamingList(null);
+      setShareKeyShown(snapshot.key);
+    } catch (err) {
+      Alert.alert('Could not share list', err instanceof Error ? err.message : String(err));
+    } finally {
+      setShareBusy(false);
+    }
   };
 
   const confirmDeleteList = (list: TodoList) => {
@@ -119,6 +188,7 @@ export default function TodoSection() {
         onPress: () => {
           db.deleteList(list.id);
           refreshLists();
+          refreshSyncConnections();
         },
       },
     ]);
@@ -136,11 +206,13 @@ export default function TodoSection() {
     setEditorVisible(false);
     setEditingTask(null);
     refreshTasks(activeListId);
+    pushTodoListIfShared(activeListId);
   };
 
   const toggleDone = (task: Task) => {
     db.setTaskDone(task.id, !task.done);
     refreshTasks(activeListId);
+    pushTodoListIfShared(task.listId);
   };
 
   const deleteTask = (task: Task) => {
@@ -152,6 +224,7 @@ export default function TodoSection() {
         onPress: () => {
           db.deleteTask(task.id);
           refreshTasks(activeListId);
+          pushTodoListIfShared(task.listId);
         },
       },
     ]);
@@ -159,7 +232,7 @@ export default function TodoSection() {
 
   return (
     <View style={styles.container}>
-      {/* Tab strip: one tab per list plus a "+" tab that creates a new list. */}
+      {/* Tab strip: one tab per list plus a "+" tab that creates or joins a list. */}
       <ScrollView
         horizontal
         showsHorizontalScrollIndicator={false}
@@ -177,11 +250,12 @@ export default function TodoSection() {
               style={[styles.tabText, list.id === activeListId && styles.tabTextActive]}
               numberOfLines={1}
             >
+              {list.shareKey ? '🔗 ' : ''}
               {list.name}
             </Text>
           </Pressable>
         ))}
-        <Pressable onPress={addList} style={styles.tab} accessibilityLabel="Add list">
+        <Pressable onPress={openAddMenu} style={styles.tab} accessibilityLabel="Add list">
           <Text style={styles.plusTab}>+</Text>
         </Pressable>
       </ScrollView>
@@ -192,6 +266,14 @@ export default function TodoSection() {
           <Text style={styles.listTitle} numberOfLines={1}>
             {activeList?.name ?? ''}
           </Text>
+          <Pressable
+            onPress={() => setServerSettingsVisible(true)}
+            hitSlop={8}
+            accessibilityLabel="Server settings"
+            style={styles.settingsButton}
+          >
+            <Text style={styles.settingsIcon}>⚙</Text>
+          </Pressable>
           <Pressable
             onPress={() => {
               setEditingTask(null);
@@ -252,12 +334,24 @@ export default function TodoSection() {
               autoFocus
               selectTextOnFocus
             />
+            {renamingList?.shareKey && <Text style={styles.sharedNote}>🔗 This list is shared</Text>}
+            {shareBusy && <ActivityIndicator style={styles.renameSpinner} />}
             <View style={styles.renameActions}>
               <Pressable
                 onPress={() => renamingList && confirmDeleteList(renamingList)}
                 style={styles.renameButton}
+                disabled={shareBusy}
               >
                 <Text style={styles.deleteText}>Delete</Text>
+              </Pressable>
+              <Pressable
+                onPress={() => renamingList && shareList(renamingList)}
+                style={styles.renameButton}
+                disabled={shareBusy}
+              >
+                <Text style={styles.shareText}>
+                  {renamingList?.shareKey ? 'View Key' : 'Share'}
+                </Text>
               </Pressable>
               <View style={styles.renameSpacer} />
               <Pressable onPress={() => setRenamingList(null)} style={styles.renameButton}>
@@ -270,6 +364,45 @@ export default function TodoSection() {
           </View>
         </View>
       </Modal>
+
+      {/* "+" chooser: start a brand new list, or join one someone shared with you. */}
+      <Modal
+        visible={addMenuVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setAddMenuVisible(false)}
+      >
+        <Pressable style={styles.menuBackdrop} onPress={() => setAddMenuVisible(false)}>
+          <View style={styles.addMenu}>
+            <Pressable style={styles.menuItem} onPress={startNewList}>
+              <Text style={styles.menuText}>New List</Text>
+            </Pressable>
+            <View style={styles.menuDivider} />
+            <Pressable style={styles.menuItem} onPress={startJoinList}>
+              <Text style={styles.menuText}>Join Shared List</Text>
+            </Pressable>
+          </View>
+        </Pressable>
+      </Modal>
+
+      <EnterKeyModal
+        visible={joinVisible}
+        title="Join Shared List"
+        body="Enter the share key someone gave you to add their todo list here."
+        onCancel={() => setJoinVisible(false)}
+        onSubmit={joinSharedList}
+      />
+
+      <ShareKeyModal
+        visible={shareKeyShown != null}
+        shareKey={shareKeyShown}
+        onClose={() => setShareKeyShown(null)}
+      />
+
+      <ServerSettingsModal
+        visible={serverSettingsVisible}
+        onClose={() => setServerSettingsVisible(false)}
+      />
     </View>
   );
 }
@@ -328,6 +461,14 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: 'bold',
     color: '#222',
+  },
+  settingsButton: {
+    padding: 4,
+    marginRight: 8,
+  },
+  settingsIcon: {
+    fontSize: 20,
+    color: '#555',
   },
   addTaskButton: {
     width: 34,
@@ -403,5 +544,46 @@ const styles = StyleSheet.create({
     color: '#1a5fb4',
     fontWeight: 'bold',
     fontSize: 15,
+  },
+  shareText: {
+    color: '#1a5fb4',
+    fontSize: 15,
+  },
+  sharedNote: {
+    marginTop: 8,
+    fontSize: 13,
+    color: '#666',
+  },
+  renameSpinner: {
+    marginTop: 8,
+  },
+  menuBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.15)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  addMenu: {
+    backgroundColor: '#fff',
+    borderRadius: 8,
+    elevation: 6,
+    shadowColor: '#000',
+    shadowOpacity: 0.25,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 3 },
+    minWidth: 200,
+    paddingVertical: 4,
+  },
+  menuItem: {
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+  },
+  menuText: {
+    fontSize: 15,
+    color: '#222',
+  },
+  menuDivider: {
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: '#ddd',
   },
 });
