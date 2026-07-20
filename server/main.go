@@ -14,10 +14,15 @@ import (
 	"os"
 	"runtime"
 	"runtime/debug"
+	"time"
 )
 
 // Version is the server's release version, bumped alongside the client.
-const Version = "1.1.1"
+const Version = "1.2.0"
+
+// shareRetention is how long a share survives without receiving an update
+// before the periodic sweep deletes it. Any edit resets the clock.
+const shareRetention = 30 * 24 * time.Hour
 
 // printVersion writes version and build information to stdout. Commit
 // details come from the VCS metadata Go embeds at build time; they are
@@ -81,6 +86,19 @@ func main() {
 		log.Fatalf("open store: %v", err)
 	}
 	defer store.Close()
+
+	// Sweep expired shares at startup and then hourly; an hour of slack on a
+	// 30-day deadline is immaterial.
+	go func() {
+		for {
+			if n, err := store.PurgeExpired(shareRetention); err != nil {
+				log.Printf("purge expired shares: %v", err)
+			} else if n > 0 {
+				log.Printf("purged %d expired share(s)", n)
+			}
+			time.Sleep(time.Hour)
+		}
+	}()
 
 	s := &Server{
 		store:     store,

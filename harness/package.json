@@ -1,0 +1,12 @@
+{
+  "name": "jodoo-harness",
+  "private": true,
+  "description": "End-to-end sync test: real Go server + two simulated app clients built on the app's own syncCore.",
+  "scripts": {
+    "test": "tsx run.ts",
+    "test:remote": "tsx run-remote.ts"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0"
+  }
+}

@@ -1,7 +1,19 @@
 import * as SQLite from 'expo-sqlite';
 import { SEED_FOOD_ITEMS } from './foodItems';
+import {
+  normalizeShoppingItems,
+  normalizeTaskItems,
+  parseSyncTimestamp,
+  SyncShoppingItem,
+  SyncTaskItem,
+} from './syncCore';
 import { DictionaryEntry, ShoppingItem, Task, TodoList } from './types';
 import { generateUuid } from './uuid';
+
+// The pure protocol pieces (item shapes, fingerprints, merge) live in
+// syncCore so the test harness can import them without expo; re-exported
+// here so the rest of the app keeps a single sync entry point.
+export * from './syncCore';
 
 const db = SQLite.openDatabaseSync('jodoo.db');
 
@@ -48,6 +60,12 @@ export function initDb(): void {
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS sync_deletions (
+      scope TEXT NOT NULL,
+      uuid TEXT NOT NULL,
+      deleted_at TEXT NOT NULL,
+      PRIMARY KEY (scope, uuid)
+    );
   `);
 
   // Migrations for list/task sharing support (added after first release).
@@ -61,6 +79,10 @@ export function initDb(): void {
   ensureColumn('lists', 'updated_at', "TEXT NOT NULL DEFAULT ''");
   ensureColumn('tasks', 'uuid', 'TEXT');
   ensureColumn('shopping_items', 'uuid', 'TEXT');
+  // Per-item edit time, the basis for item-level last-write-wins merging of
+  // shared lists. Blank means "older than any real edit".
+  ensureColumn('tasks', 'updated_at', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn('shopping_items', 'updated_at', "TEXT NOT NULL DEFAULT ''");
   // Backfill any pre-existing rows that predate the uuid column.
   for (const row of db.getAllSync<{ id: number }>('SELECT id FROM tasks WHERE uuid IS NULL')) {
     db.runSync('UPDATE tasks SET uuid = ? WHERE id = ?', generateUuid(), row.id);
@@ -125,22 +147,57 @@ export function deleteSetting(key: string): void {
 
 // ---------- Sync state ----------
 //
-// Arbitration between local and remote copies of a shared list rests on the
-// server's monotonically increasing version counter plus a local dirty flag,
-// not on comparing clocks. Wall-clock timestamps are recorded on local edits
-// only as a tie-break for genuine concurrent-edit conflicts, where any
-// choice is defensible.
+// Shared lists are reconciled item by item: every item carries its own edit
+// timestamp, and the newer edit of any single item wins, so non-conflicting
+// changes from different devices all survive a merge. Deletions are kept as
+// tombstones (uuid + deletion time) so a deleted item is distinguishable
+// from one a peer has not seen yet - without them, every merge would
+// resurrect deleted items. The server's monotonically increasing version
+// counter still orders snapshots; the per-list dirty flag and edit time now
+// arbitrate only the list *name*, which has no per-item timestamp.
 
-/**
- * Parses an ISO/RFC3339 timestamp to epoch milliseconds. Go's RFC3339Nano
- * trims trailing zeros so fractional seconds arrive with 1-9 digits, while
- * ECMA-262 only guarantees parsing of exactly 3; normalize before parsing.
- * Blank/bad input parses as 0, i.e. "older than everything".
- */
-export function parseSyncTimestamp(ts: string): number {
-  if (!ts) return 0;
-  const ms = Date.parse(ts.replace(/\.(\d+)/, (_, f: string) => '.' + (f + '00').slice(0, 3)));
-  return Number.isNaN(ms) ? 0 : ms;
+export const SHOPPING_SHARE_KEY_SETTING = 'shopping_share_key';
+
+/** Tombstone scope for a todo list's deletions. */
+function listScope(listId: number): string {
+  return `list:${listId}`;
+}
+
+const SHOPPING_SCOPE = 'shopping';
+
+/** How long deletion tombstones are kept before being purged. A device that
+ *  stays offline longer than this may resurrect items deleted by its peers. */
+const TOMBSTONE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+
+/** Records "item `uuid` was just deleted from `scope`", so the deletion
+ *  propagates through merges instead of being undone by them. */
+function addTombstone(scope: string, uuid: string | null | undefined): void {
+  if (!uuid) return;
+  db.runSync(
+    'INSERT INTO sync_deletions (scope, uuid, deleted_at) VALUES (?, ?, ?) ON CONFLICT(scope, uuid) DO UPDATE SET deleted_at = excluded.deleted_at',
+    scope,
+    uuid,
+    new Date().toISOString()
+  );
+}
+
+interface TombstoneRow {
+  uuid: string;
+  deleted_at: string;
+}
+
+/** Live tombstones for a scope, oldest ones purged first. */
+function getTombstones(scope: string): TombstoneRow[] {
+  const cutoff = Date.now() - TOMBSTONE_RETENTION_MS;
+  const rows = db.getAllSync<TombstoneRow>(
+    'SELECT uuid, deleted_at FROM sync_deletions WHERE scope = ? ORDER BY uuid',
+    scope
+  );
+  const expired = rows.filter((r) => parseSyncTimestamp(r.deleted_at) < cutoff);
+  for (const r of expired) {
+    db.runSync('DELETE FROM sync_deletions WHERE scope = ? AND uuid = ?', scope, r.uuid);
+  }
+  return rows.filter((r) => parseSyncTimestamp(r.deleted_at) >= cutoff);
 }
 
 /** Sync-arbitration state shared by todo lists and the shopping list.
@@ -295,6 +352,17 @@ export function setListShareKey(id: number, shareKey: string, syncedVersion: num
   );
 }
 
+/** Detaches a list from its share: the list and its tasks stay on this
+ *  device but stop syncing. The share itself (and every other user's copy)
+ *  is untouched; local sync state and tombstones are discarded. */
+export function detachList(id: number): void {
+  db.runSync(
+    "UPDATE lists SET share_key = NULL, synced_version = 0, dirty = 0, updated_at = '' WHERE id = ?",
+    id
+  );
+  db.runSync('DELETE FROM sync_deletions WHERE scope = ?', listScope(id));
+}
+
 export function renameList(id: number, name: string): void {
   db.runSync('UPDATE lists SET name = ? WHERE id = ?', name.trim(), id);
   markListDirty(id);
@@ -311,7 +379,21 @@ export function reorderLists(orderedIds: number[]): void {
 
 export function deleteList(id: number): void {
   db.runSync('DELETE FROM tasks WHERE list_id = ?', id);
+  db.runSync('DELETE FROM sync_deletions WHERE scope = ?', listScope(id));
   db.runSync('DELETE FROM lists WHERE id = ?', id);
+}
+
+/** Deletes every todo list (tasks, sync state, and share bindings included),
+ *  then recreates the single default list so the To Do section is never
+ *  empty. Only this device is reset - shared copies on the server and on
+ *  peers' devices are untouched. */
+export function deleteAllLists(): TodoList {
+  db.withTransactionSync(() => {
+    db.runSync('DELETE FROM tasks');
+    db.runSync("DELETE FROM sync_deletions WHERE scope LIKE 'list:%'");
+    db.runSync('DELETE FROM lists');
+  });
+  return createList();
 }
 
 // ---------- Tasks ----------
@@ -368,14 +450,15 @@ export function createTask(
     listId
   )!.p;
   db.runSync(
-    'INSERT INTO tasks (list_id, uuid, title, description, due_date, color_index, position) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    'INSERT INTO tasks (list_id, uuid, title, description, due_date, color_index, position, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
     listId,
     generateUuid(),
     title.trim(),
     description.trim(),
     dueDate,
     colorIndex,
-    position
+    position,
+    new Date().toISOString()
   );
   markListDirty(listId);
 }
@@ -387,43 +470,83 @@ export function updateTask(
   dueDate: string | null
 ): void {
   db.runSync(
-    'UPDATE tasks SET title = ?, description = ?, due_date = ? WHERE id = ?',
+    'UPDATE tasks SET title = ?, description = ?, due_date = ?, updated_at = ? WHERE id = ?',
     title.trim(),
     description.trim(),
     dueDate,
+    new Date().toISOString(),
     id
   );
   markListOfTaskDirty(id);
 }
 
 export function setTaskDone(id: number, done: boolean): void {
-  db.runSync('UPDATE tasks SET done = ? WHERE id = ?', done ? 1 : 0, id);
+  db.runSync(
+    'UPDATE tasks SET done = ?, updated_at = ? WHERE id = ?',
+    done ? 1 : 0,
+    new Date().toISOString(),
+    id
+  );
   markListOfTaskDirty(id);
+}
+
+/** Tombstones a task that is about to leave its current list (deletion or
+ *  move), but only when that list is shared - unshared lists never merge, so
+ *  their tombstones would just accumulate. Must run while the row exists. */
+function tombstoneTaskIfShared(taskId: number): void {
+  const row = db.getFirstSync<{ uuid: string; list_id: number; share_key: string | null }>(
+    'SELECT t.uuid, t.list_id, l.share_key FROM tasks t JOIN lists l ON l.id = t.list_id WHERE t.id = ?',
+    taskId
+  );
+  if (row?.share_key) addTombstone(listScope(row.list_id), row.uuid);
 }
 
 /** Moves a task to a different list (used by drag-and-drop in the UI); it is
  *  appended to the end of the destination list. */
 export function moveTaskToList(id: number, newListId: number): void {
-  // Mark the source list while the task still points at it.
+  // Mark the source list while the task still points at it; to that list's
+  // share this is a deletion, so it also needs a tombstone.
   markListOfTaskDirty(id);
+  tombstoneTaskIfShared(id);
   const position = db.getFirstSync<{ p: number }>(
     'SELECT COALESCE(MAX(position), -1) + 1 AS p FROM tasks WHERE list_id = ?',
     newListId
   )!.p;
   db.runSync(
-    'UPDATE tasks SET list_id = ?, position = ? WHERE id = ?',
+    'UPDATE tasks SET list_id = ?, position = ?, updated_at = ? WHERE id = ?',
     newListId,
     position,
+    new Date().toISOString(),
     id
   );
+  // If this task once lived in (and was tombstoned out of) the destination
+  // list, its return must not be undone by the old tombstone.
+  const uuid = db.getFirstSync<{ uuid: string }>('SELECT uuid FROM tasks WHERE id = ?', id)?.uuid;
+  if (uuid) {
+    db.runSync(
+      'DELETE FROM sync_deletions WHERE scope = ? AND uuid = ?',
+      listScope(newListId),
+      uuid
+    );
+  }
   markListDirty(newListId);
 }
 
 /** Persists a new task order within a list (used by drag-to-reorder in the UI). */
 export function reorderTasks(listId: number, orderedIds: number[]): void {
+  const now = new Date().toISOString();
   db.withTransactionSync(() => {
     orderedIds.forEach((id, index) => {
-      db.runSync('UPDATE tasks SET position = ? WHERE id = ? AND list_id = ?', index, id, listId);
+      // Only touch rows whose position actually changes, so a reorder doesn't
+      // make every task look freshly edited to the sync merge.
+      db.runSync(
+        'UPDATE tasks SET position = ?, updated_at = ? WHERE id = ? AND list_id = ? AND position <> ?',
+        index,
+        now,
+        id,
+        listId,
+        index
+      );
     });
   });
   markListDirty(listId);
@@ -432,63 +555,70 @@ export function reorderTasks(listId: number, orderedIds: number[]): void {
 export function deleteTask(id: number): void {
   // Mark first: the list lookup needs the task row to still exist.
   markListOfTaskDirty(id);
+  tombstoneTaskIfShared(id);
   db.runSync('DELETE FROM tasks WHERE id = ?', id);
 }
 
 // ---------- Sync: todo list snapshot export/apply ----------
 
-/** Plain-object shape sent to / received from the sync server for a task. */
-export interface SyncTaskItem {
-  uuid: string;
-  title: string;
-  description: string;
-  dueDate: string | null;
-  colorIndex: number;
-  done: boolean;
-}
-
-/** The current contents of a list, shaped for pushing to the sync server. */
-export function getTasksAsSyncItems(listId: number): SyncTaskItem[] {
-  return getTasks(listId).map((t) => ({
+/** The list's full sync record set: live tasks in display order followed by
+ *  deletion tombstones (uuid-sorted). This is what gets pushed to the server
+ *  and merged against incoming snapshots. */
+export function getTaskSyncRecords(listId: number): SyncTaskItem[] {
+  // Canonical (position, uuid) order - the same order mergeRecords emits -
+  // so an unchanged list fingerprints identically to its own merge result.
+  const live: SyncTaskItem[] = db
+    .getAllSync<TaskRow & { updated_at: string }>(
+      'SELECT * FROM tasks WHERE list_id = ? ORDER BY position, uuid',
+      listId
+    )
+    .map((r) => ({
+      uuid: r.uuid,
+      title: r.title,
+      description: r.description,
+      dueDate: r.due_date,
+      colorIndex: r.color_index,
+      done: r.done === 1,
+      position: r.position,
+      updatedAt: r.updated_at,
+    }));
+  const tombstones: SyncTaskItem[] = getTombstones(listScope(listId)).map((t) => ({
     uuid: t.uuid,
-    title: t.title,
-    description: t.description,
-    dueDate: t.dueDate,
-    colorIndex: t.colorIndex,
-    done: t.done,
+    title: '',
+    description: '',
+    dueDate: null,
+    colorIndex: 0,
+    done: false,
+    position: 0,
+    updatedAt: t.deleted_at,
+    deleted: true,
   }));
-}
-
-/** Canonical content fingerprint for comparing a local list against a
- *  snapshot. Projects each item onto a fixed field order because the server
- *  stores items as opaque maps and re-serializes their keys alphabetically,
- *  so raw JSON comparison would always mismatch. Must enumerate exactly the
- *  fields of {@link SyncTaskItem}. */
-export function taskFingerprint(items: SyncTaskItem[]): string {
-  return JSON.stringify(
-    items.map((i) => [i.uuid, i.title, i.description, i.dueDate ?? null, i.colorIndex, !!i.done])
-  );
+  return [...live, ...tombstones];
 }
 
 /**
- * Replaces a list's name and tasks with a snapshot received from the sync
- * server, adopts the snapshot's server version (never moving backwards), and
- * clears the dirty flag - the server now holds this content. Tasks are
- * matched by `uuid`: known uuids are updated in place, unknown ones are
- * inserted, and local tasks whose uuid is missing from the snapshot are
- * deleted (the server always sends the whole list).
+ * Writes a merged record set back to a list: live records are upserted by
+ * `uuid` (position and edit time included), tombstoned records delete any
+ * matching local task and are remembered in `sync_deletions` so the deletion
+ * survives future merges. Adopts the snapshot's server version (never moving
+ * backwards); `clearDirty` is false when the caller is about to push local
+ * changes the server hasn't acknowledged yet. An empty `name` keeps the
+ * current list name.
  */
 export function applySyncedTasks(
   listId: number,
   name: string,
   items: SyncTaskItem[],
-  version: number
+  version: number,
+  clearDirty = true
 ): void {
+  const scope = listScope(listId);
   db.withTransactionSync(() => {
     db.runSync(
-      "UPDATE lists SET name = COALESCE(NULLIF(?, ''), name), synced_version = MAX(synced_version, ?), dirty = 0 WHERE id = ?",
+      "UPDATE lists SET name = COALESCE(NULLIF(?, ''), name), synced_version = MAX(synced_version, ?), dirty = CASE WHEN ? THEN 0 ELSE dirty END WHERE id = ?",
       name,
       version,
+      clearDirty ? 1 : 0,
       listId
     );
     const existing = db.getAllSync<{ id: number; uuid: string }>(
@@ -497,47 +627,67 @@ export function applySyncedTasks(
     );
     const byUuid = new Map(existing.map((e) => [e.uuid, e.id]));
     const seen = new Set<string>();
-    items.forEach((item, index) => {
-      if (!item.uuid) return;
+    for (const item of normalizeTaskItems(items)) {
       seen.add(item.uuid);
       const existingId = byUuid.get(item.uuid);
-      // Items arrive via an untyped relay from other builds; default any
-      // missing field rather than letting one bad item abort every apply.
-      const title = String(item.title ?? '');
-      const description = String(item.description ?? '');
-      const dueDate = item.dueDate ?? null;
-      const colorIndex = Number.isFinite(item.colorIndex) ? item.colorIndex : index % 8;
+      if (item.deleted) {
+        if (existingId != null) db.runSync('DELETE FROM tasks WHERE id = ?', existingId);
+        db.runSync(
+          'INSERT INTO sync_deletions (scope, uuid, deleted_at) VALUES (?, ?, ?) ON CONFLICT(scope, uuid) DO UPDATE SET deleted_at = excluded.deleted_at',
+          scope,
+          item.uuid,
+          item.updatedAt || new Date().toISOString()
+        );
+        continue;
+      }
       if (existingId != null) {
         db.runSync(
-          'UPDATE tasks SET title = ?, description = ?, due_date = ?, color_index = ?, done = ?, position = ? WHERE id = ?',
-          title,
-          description,
-          dueDate,
-          colorIndex,
+          'UPDATE tasks SET title = ?, description = ?, due_date = ?, color_index = ?, done = ?, position = ?, updated_at = ? WHERE id = ?',
+          item.title,
+          item.description,
+          item.dueDate,
+          item.colorIndex,
           item.done ? 1 : 0,
-          index,
+          item.position,
+          item.updatedAt,
           existingId
         );
       } else {
         db.runSync(
-          'INSERT INTO tasks (list_id, uuid, title, description, due_date, color_index, done, position) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+          'INSERT INTO tasks (list_id, uuid, title, description, due_date, color_index, done, position, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
           listId,
           item.uuid,
-          title,
-          description,
-          dueDate,
-          colorIndex,
+          item.title,
+          item.description,
+          item.dueDate,
+          item.colorIndex,
           item.done ? 1 : 0,
-          index
+          item.position,
+          item.updatedAt
         );
       }
-    });
+      // The item exists again (or still); a stale tombstone must not linger.
+      db.runSync('DELETE FROM sync_deletions WHERE scope = ? AND uuid = ?', scope, item.uuid);
+    }
+    // Safety net: local rows the record set doesn't mention at all.
     for (const e of existing) {
       if (!seen.has(e.uuid)) {
         db.runSync('DELETE FROM tasks WHERE id = ?', e.id);
       }
     }
   });
+}
+
+/** Records that a snapshot at `version` was seen and fully reconciled
+ *  without needing any local writes; still clears the dirty flag unless the
+ *  caller has local changes left to push. */
+export function adoptListSync(listId: number, version: number, clearDirty: boolean): void {
+  db.runSync(
+    'UPDATE lists SET synced_version = MAX(synced_version, ?), dirty = CASE WHEN ? THEN 0 ELSE dirty END WHERE id = ?',
+    version,
+    clearDirty ? 1 : 0,
+    listId
+  );
 }
 
 // ---------- Shopping ----------
@@ -567,82 +717,132 @@ export function addShoppingItem(name: string): void {
     'SELECT COALESCE(MAX(position), 0) + 1 AS p FROM shopping_items'
   )!.p;
   db.runSync(
-    'INSERT INTO shopping_items (name, uuid, position) VALUES (?, ?, ?)',
+    'INSERT INTO shopping_items (name, uuid, position, updated_at) VALUES (?, ?, ?, ?)',
     name.trim(),
     generateUuid(),
-    pos
+    pos,
+    new Date().toISOString()
   );
   markShoppingDirty();
 }
 
 export function setShoppingChecked(id: number, checked: boolean): void {
-  db.runSync('UPDATE shopping_items SET checked = ? WHERE id = ?', checked ? 1 : 0, id);
+  db.runSync(
+    'UPDATE shopping_items SET checked = ?, updated_at = ? WHERE id = ?',
+    checked ? 1 : 0,
+    new Date().toISOString(),
+    id
+  );
   markShoppingDirty();
 }
 
+/** Tombstones shopping items about to be deleted, but only while the
+ *  shopping list is shared (unshared lists never merge). */
+function tombstoneShoppingItems(ids: number[]): void {
+  if (!getSetting(SHOPPING_SHARE_KEY_SETTING)) return;
+  for (const id of ids) {
+    const row = db.getFirstSync<{ uuid: string }>(
+      'SELECT uuid FROM shopping_items WHERE id = ?',
+      id
+    );
+    addTombstone(SHOPPING_SCOPE, row?.uuid);
+  }
+}
+
 export function deleteShoppingItem(id: number): void {
+  tombstoneShoppingItems([id]);
   db.runSync('DELETE FROM shopping_items WHERE id = ?', id);
   markShoppingDirty();
 }
 
 export function clearCheckedShoppingItems(): void {
+  const checked = db.getAllSync<{ id: number }>('SELECT id FROM shopping_items WHERE checked = 1');
+  tombstoneShoppingItems(checked.map((r) => r.id));
   db.runSync('DELETE FROM shopping_items WHERE checked = 1');
   markShoppingDirty();
 }
 
 // ---------- Sync: shopping list snapshot export/apply ----------
 
-export interface SyncShoppingItem {
-  uuid: string;
-  name: string;
-  checked: boolean;
-}
-
-export function getShoppingItemsAsSyncItems(): SyncShoppingItem[] {
-  return getShoppingItems().map((i) => ({ uuid: i.uuid, name: i.name, checked: i.checked }));
-}
-
-/** Like {@link taskFingerprint}, for {@link SyncShoppingItem}. */
-export function shoppingFingerprint(items: SyncShoppingItem[]): string {
-  return JSON.stringify(items.map((i) => [i.uuid, i.name, !!i.checked]));
+/** Shopping counterpart of {@link getTaskSyncRecords}. */
+export function getShoppingSyncRecords(): SyncShoppingItem[] {
+  // Canonical (position, uuid) order, mirroring getTaskSyncRecords.
+  const live: SyncShoppingItem[] = db
+    .getAllSync<ShoppingRow & { updated_at: string }>(
+      'SELECT * FROM shopping_items ORDER BY position, uuid'
+    )
+    .map((r) => ({
+      uuid: r.uuid,
+      name: r.name,
+      checked: r.checked === 1,
+      position: r.position,
+      updatedAt: r.updated_at,
+    }));
+  const tombstones: SyncShoppingItem[] = getTombstones(SHOPPING_SCOPE).map((t) => ({
+    uuid: t.uuid,
+    name: '',
+    checked: false,
+    position: 0,
+    updatedAt: t.deleted_at,
+    deleted: true,
+  }));
+  return [...live, ...tombstones];
 }
 
 /** Same reconciliation strategy as {@link applySyncedTasks}, for the single
- *  shopping list; likewise adopts the server version and clears dirty. */
-export function applySyncedShoppingItems(items: SyncShoppingItem[], version: number): void {
+ *  shopping list. */
+export function applySyncedShoppingItems(
+  items: SyncShoppingItem[],
+  version: number,
+  clearDirty = true
+): void {
   db.withTransactionSync(() => {
     const current = Number(getSetting(SHOPPING_SYNCED_VERSION_SETTING) ?? 0);
     setSetting(SHOPPING_SYNCED_VERSION_SETTING, String(Math.max(current, version)));
-    setSetting(SHOPPING_DIRTY_SETTING, '0');
+    if (clearDirty) setSetting(SHOPPING_DIRTY_SETTING, '0');
     const existing = db.getAllSync<{ id: number; uuid: string }>(
       'SELECT id, uuid FROM shopping_items'
     );
     const byUuid = new Map(existing.map((e) => [e.uuid, e.id]));
     const seen = new Set<string>();
-    items.forEach((item, index) => {
-      if (!item.uuid) return;
+    for (const item of normalizeShoppingItems(items)) {
       seen.add(item.uuid);
       const existingId = byUuid.get(item.uuid);
-      // Untyped relay: default missing fields, as in applySyncedTasks.
-      const name = String(item.name ?? '');
+      if (item.deleted) {
+        if (existingId != null) db.runSync('DELETE FROM shopping_items WHERE id = ?', existingId);
+        db.runSync(
+          'INSERT INTO sync_deletions (scope, uuid, deleted_at) VALUES (?, ?, ?) ON CONFLICT(scope, uuid) DO UPDATE SET deleted_at = excluded.deleted_at',
+          SHOPPING_SCOPE,
+          item.uuid,
+          item.updatedAt || new Date().toISOString()
+        );
+        continue;
+      }
       if (existingId != null) {
         db.runSync(
-          'UPDATE shopping_items SET name = ?, checked = ?, position = ? WHERE id = ?',
-          name,
+          'UPDATE shopping_items SET name = ?, checked = ?, position = ?, updated_at = ? WHERE id = ?',
+          item.name,
           item.checked ? 1 : 0,
-          index,
+          item.position,
+          item.updatedAt,
           existingId
         );
       } else {
         db.runSync(
-          'INSERT INTO shopping_items (name, uuid, checked, position) VALUES (?, ?, ?, ?)',
-          name,
+          'INSERT INTO shopping_items (name, uuid, checked, position, updated_at) VALUES (?, ?, ?, ?, ?)',
+          item.name,
           item.uuid,
           item.checked ? 1 : 0,
-          index
+          item.position,
+          item.updatedAt
         );
       }
-    });
+      db.runSync(
+        'DELETE FROM sync_deletions WHERE scope = ? AND uuid = ?',
+        SHOPPING_SCOPE,
+        item.uuid
+      );
+    }
     for (const e of existing) {
       if (!seen.has(e.uuid)) {
         db.runSync('DELETE FROM shopping_items WHERE id = ?', e.id);
@@ -651,14 +851,43 @@ export function applySyncedShoppingItems(items: SyncShoppingItem[], version: num
   });
 }
 
+/** Shopping counterpart of {@link adoptListSync}. */
+export function adoptShoppingSync(version: number, clearDirty: boolean): void {
+  const current = Number(getSetting(SHOPPING_SYNCED_VERSION_SETTING) ?? 0);
+  setSetting(SHOPPING_SYNCED_VERSION_SETTING, String(Math.max(current, version)));
+  if (clearDirty) setSetting(SHOPPING_DIRTY_SETTING, '0');
+}
+
 /** Deletes every local shopping item; used right before adopting someone
- *  else's shared shopping list via its key. Resets the sync state so the new
- *  share's first snapshot always applies. */
+ *  else's shared shopping list via its key. Resets the sync state (including
+ *  tombstones from the previous binding) so the new share's first snapshot
+ *  always applies cleanly. */
 export function clearAllShoppingItems(): void {
   db.runSync('DELETE FROM shopping_items');
+  db.runSync('DELETE FROM sync_deletions WHERE scope = ?', SHOPPING_SCOPE);
   deleteSetting(SHOPPING_SYNCED_VERSION_SETTING);
   deleteSetting(SHOPPING_DIRTY_SETTING);
   deleteSetting(SHOPPING_UPDATED_AT_SETTING);
+}
+
+/** Shopping counterpart of {@link detachList}: keeps the items on this
+ *  device but stops syncing them; the share and other users are untouched. */
+export function detachShoppingShare(): void {
+  deleteSetting(SHOPPING_SHARE_KEY_SETTING);
+  db.runSync('DELETE FROM sync_deletions WHERE scope = ?', SHOPPING_SCOPE);
+  deleteSetting(SHOPPING_SYNCED_VERSION_SETTING);
+  deleteSetting(SHOPPING_DIRTY_SETTING);
+  deleteSetting(SHOPPING_UPDATED_AT_SETTING);
+}
+
+/** Device-local reset of the whole shopping side: detaches from any share,
+ *  deletes every item and all sync state, and restores the default
+ *  dictionary. Detaching comes first so nothing is tombstoned or pushed -
+ *  the share and every other user's copy stay exactly as they are. */
+export function resetShoppingList(): void {
+  deleteSetting(SHOPPING_SHARE_KEY_SETTING);
+  clearAllShoppingItems();
+  resetDictionary();
 }
 
 
@@ -751,4 +980,19 @@ export function editDictionaryEntry(id: number, raw: string): void {
 
 export function deleteDictionaryEntry(id: number): void {
   db.runSync('DELETE FROM dictionary WHERE id = ?', id);
+}
+
+/** Deletes every entry and restores the built-in seed dictionary; custom
+ *  entries and usage counts are discarded. */
+export function resetDictionary(): void {
+  db.withTransactionSync(() => {
+    db.runSync('DELETE FROM dictionary');
+    for (const item of SEED_FOOD_ITEMS) {
+      db.runSync(
+        'INSERT OR IGNORE INTO dictionary (name, name_lower) VALUES (?, ?)',
+        item,
+        item.toLowerCase()
+      );
+    }
+  });
 }

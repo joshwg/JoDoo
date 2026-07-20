@@ -39,6 +39,9 @@ yarn-error.*
 # typescript
 *.tsbuildinfo
 
-# generated native folders
-/ios
-/android
+# generated native folders (expo prebuild output; app lives in app/)
+/app/ios
+/app/android
+
+# compiled server binary
+/server/jodoo-server

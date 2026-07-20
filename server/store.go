@@ -133,6 +133,19 @@ func (s *Store) Create(kind ListKind, name string, items []Item) (*Share, error)
 	}
 }
 
+// PurgeExpired deletes shares that have not been updated for longer than
+// maxAge, returning how many were removed. The server's copy is only a
+// temporary sync aid, so abandoned shares should not accumulate forever;
+// clients keep their own data regardless.
+func (s *Store) PurgeExpired(maxAge time.Duration) (int64, error) {
+	cutoff := time.Now().UTC().Add(-maxAge).Format(time.RFC3339Nano)
+	res, err := s.db.Exec(`DELETE FROM shares WHERE updated_at < ?`, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 // Update replaces the name/items of an existing share and bumps its version.
 // The whole list is replaced wholesale (last-write-wins) rather than merged,
 // since the server only keeps a temporary copy to aid synchronization.

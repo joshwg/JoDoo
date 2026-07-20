@@ -27,14 +27,19 @@ Env vars:
 - `DATA_DIR` (default `./data`): directory holding `jodoo.db` (SQLite), the
   persistent-but-temporary store of shared lists.
 
+Retention: shares are kept for 30 days from their last update; an hourly
+sweep deletes anything older. Every edit resets the clock, and clients keep
+their own local copy regardless, so an expired share only means the key stops
+working - re-sharing the list mints a new one.
+
 Flags:
 
 - `--version`: print version and build information (Go version, git commit,
   commit date) and exit. Works without any env vars set:
 
   ```
-  $ ./server --version
-  jodoo-server v1.1.1
+  $ ./jodoo-server --version
+  jodoo-server v1.2.0
     go:      go1.26.4 (linux/amd64)
     commit:  c18d01913340
     from:    2026-07-19T22:41:20Z
@@ -72,5 +77,9 @@ WebSocket clients can't set custom headers).
   bumps the version, and broadcasts the new snapshot to every connection in
   that share (including the sender).
 
-Conflict handling is last-write-wins - the store is a temporary sync aid, not
-a merge engine.
+The server itself stores each update wholesale and never merges - it is a
+temporary sync aid, not a merge engine. Merging is done by the clients: every
+item carries its own edit timestamp (plus tombstones for deletions), each
+client folds incoming snapshots into its local state item by item, and pushes
+the merged result back. Non-conflicting changes from different devices all
+survive; when two devices edit the same item, the later edit wins.

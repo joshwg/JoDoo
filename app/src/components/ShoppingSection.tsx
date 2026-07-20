@@ -13,7 +13,7 @@ import {
 import { APP_NAME, APP_VERSION, BUILD_DATE, COPYRIGHT } from '../appInfo';
 import * as db from '../db';
 import { subscribeRemoteUpdate } from '../remoteUpdates';
-import { createShare, fetchShare } from '../syncClient';
+import { createShare, fetchShare, shareExists } from '../syncClient';
 import {
   pushShoppingIfShared,
   refreshSyncConnections,
@@ -69,19 +69,15 @@ export default function ShoppingSection() {
     pushShoppingIfShared();
   };
 
-  const shareShoppingList = async () => {
-    const existingKey = db.getSetting(SHOPPING_SHARE_KEY_SETTING);
-    if (existingKey) {
-      setMenuOpen(false);
-      setShareKeyShown(existingKey);
-      return;
-    }
+  /** Creates a fresh shopping share (first share or replacing a stale key)
+   *  seeded with current items, and shows the new key. */
+  const createNewShoppingShare = async () => {
     setShareBusy(true);
     try {
       const snapshot = await createShare(
         'shopping',
         'Shopping',
-        db.getShoppingItemsAsSyncItems() as unknown as Record<string, unknown>[]
+        db.getShoppingSyncRecords() as unknown as Record<string, unknown>[]
       );
       db.setSetting(SHOPPING_SHARE_KEY_SETTING, snapshot.key);
       db.bindShoppingShare(snapshot.version);
@@ -93,6 +89,46 @@ export default function ShoppingSection() {
     } finally {
       setShareBusy(false);
     }
+  };
+
+  const shareShoppingList = async () => {
+    const existingKey = db.getSetting(SHOPPING_SHARE_KEY_SETTING);
+    if (!existingKey) {
+      await createNewShoppingShare();
+      return;
+    }
+    // View Key: verify the share still exists before showing a key that no
+    // longer works. Fail open - an unreachable server is not a dead share.
+    let exists = true;
+    setShareBusy(true);
+    try {
+      exists = await shareExists(existingKey);
+    } catch {
+      // Could not verify (offline, server down); behave as before.
+    } finally {
+      setShareBusy(false);
+    }
+    setMenuOpen(false);
+    if (exists) {
+      setShareKeyShown(existingKey);
+      return;
+    }
+    Alert.alert(
+      'Share no longer exists',
+      'The server does not recognize this key anymore - the server data was reset, or the share expired after 30 days without updates. Your items are safe on this device, but they are not syncing.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Stop Syncing',
+          onPress: () => {
+            db.detachShoppingShare();
+            refresh();
+            refreshSyncConnections();
+          },
+        },
+        { text: 'New Key', onPress: () => void createNewShoppingShare() },
+      ]
+    );
   };
 
   const joinSharedShoppingList = async (key: string) => {
@@ -113,6 +149,45 @@ export default function ShoppingSection() {
     refresh();
     await refreshSyncConnections();
     setJoinVisible(false);
+  };
+
+  const confirmDetachShopping = () => {
+    setMenuOpen(false);
+    Alert.alert(
+      'Stop syncing',
+      'Keep your shopping list on this device but disconnect it from the shared copy? Other users keep the list and can continue sharing it.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Unshare',
+          onPress: () => {
+            db.detachShoppingShare();
+            refresh();
+            refreshSyncConnections();
+          },
+        },
+      ]
+    );
+  };
+
+  const confirmDeleteShoppingList = () => {
+    setMenuOpen(false);
+    Alert.alert(
+      'Delete shopping list',
+      "Delete every shopping item, restore the default dictionary, and disconnect from any shared list? Other users' copies are not affected.",
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete All',
+          style: 'destructive',
+          onPress: () => {
+            db.resetShoppingList();
+            refresh();
+            refreshSyncConnections();
+          },
+        },
+      ]
+    );
   };
 
   const hasChecked = items.some((i) => i.checked);
@@ -241,6 +316,14 @@ export default function ShoppingSection() {
                 {db.getSetting(SHOPPING_SHARE_KEY_SETTING) ? 'View Share Key' : 'Share This List'}
               </Text>
             </Pressable>
+            {db.getSetting(SHOPPING_SHARE_KEY_SETTING) != null && (
+              <>
+                <View style={styles.menuDivider} />
+                <Pressable style={styles.menuItem} onPress={confirmDetachShopping}>
+                  <Text style={styles.menuText}>Stop Syncing</Text>
+                </Pressable>
+              </>
+            )}
             <View style={styles.menuDivider} />
             <Pressable
               style={styles.menuItem}
@@ -260,6 +343,10 @@ export default function ShoppingSection() {
               }}
             >
               <Text style={styles.menuText}>Server Settings</Text>
+            </Pressable>
+            <View style={styles.menuDivider} />
+            <Pressable style={styles.menuItem} onPress={confirmDeleteShoppingList}>
+              <Text style={styles.menuDangerText}>Delete Shopping List</Text>
             </Pressable>
             <View style={styles.menuDivider} />
             <Pressable
@@ -309,7 +396,9 @@ export default function ShoppingSection() {
             <Text style={styles.aboutVersion}>Version {APP_VERSION}</Text>
             <Text style={styles.aboutVersion}>Built {BUILD_DATE}</Text>
             <Text style={styles.aboutText}>
-              A simple to-do and shopping list app. All data stays on your device.
+              A simple to-do and shopping list app. Your data stays on your device, except for
+              lists you choose to share. Shared lists are stored on the server for up to 30 days
+              from their last update.
             </Text>
             <Text style={styles.aboutCopyright}>{COPYRIGHT}</Text>
             <Text style={styles.aboutCopyright}>MIT License</Text>
@@ -491,6 +580,10 @@ const styles = StyleSheet.create({
   menuText: {
     fontSize: 15,
     color: '#222',
+  },
+  menuDangerText: {
+    fontSize: 15,
+    color: '#c0392b',
   },
   menuDivider: {
     height: StyleSheet.hairlineWidth,

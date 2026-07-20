@@ -1,4 +1,4 @@
-module jodoo/server
+module jodoo/jodoo-server
 
 go 1.26.4
 

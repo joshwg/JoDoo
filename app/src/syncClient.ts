@@ -77,6 +77,17 @@ export async function fetchShare(key: string): Promise<ShareSnapshot> {
   return res.json();
 }
 
+/** Checks whether a share key still exists on the server. Returns false only
+ *  on a definitive 404 (server data reset, or the share expired); network or
+ *  auth problems throw instead, so callers never mistake an unreachable
+ *  server for a deleted share. */
+export async function shareExists(key: string): Promise<boolean> {
+  const res = await authedFetch(`/api/lists/${encodeURIComponent(key.trim())}`);
+  if (res.status === 404) return false;
+  if (!res.ok) throw new Error(`Could not check share (HTTP ${res.status})`);
+  return true;
+}
+
 /** Quick reachability + credential check for the Server Settings screen. */
 export async function testServerConnection(config: ServerConfig): Promise<void> {
   const baseUrl = normalizeBaseUrl(config.baseUrl);

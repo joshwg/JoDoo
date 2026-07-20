@@ -1,8 +1,9 @@
 import { StatusBar } from 'expo-status-bar';
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { PanResponder, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import * as db from './src/db';
+import { startSyncManager } from './src/syncManager';
 import ShoppingSection from './src/components/ShoppingSection';
 import TodoSection from './src/components/TodoSection';
 
@@ -13,6 +14,10 @@ const SWIPE_THRESHOLD = 50;
 export default function App() {
   // Open/create the database once, before first render of either section.
   useMemo(() => db.initDb(), []);
+  // Connect every shared list to the sync server once the UI is up; incoming
+  // snapshots then reconcile local and remote state (including edits made
+  // while the app was closed).
+  useEffect(() => startSyncManager(), []);
   const [section, setSection] = useState<Section>('todo');
 
   // A two-finger horizontal swipe toggles between the To Do and Shopping sections.

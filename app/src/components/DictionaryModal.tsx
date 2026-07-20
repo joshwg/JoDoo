@@ -71,6 +71,24 @@ export default function DictionaryModal({ visible, onClose }: Props) {
     ]);
   };
 
+  const resetAll = () => {
+    Alert.alert(
+      'Restore default dictionary',
+      'Delete all entries and restore the built-in dictionary? Your added items and usage counts will be lost.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete All',
+          style: 'destructive',
+          onPress: () => {
+            db.resetDictionary();
+            changeFilter('');
+          },
+        },
+      ]
+    );
+  };
+
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
       <View style={styles.container}>
@@ -123,6 +141,10 @@ export default function DictionaryModal({ visible, onClose }: Props) {
             <Text style={styles.empty}>No matching items. Press + to add "{filter.trim()}".</Text>
           }
         />
+
+        <Pressable onPress={resetAll} style={styles.resetButton}>
+          <Text style={styles.resetText}>Delete All & Restore Defaults</Text>
+        </Pressable>
 
         {/* Edit dialog */}
         <Modal
@@ -253,6 +275,17 @@ const styles = StyleSheet.create({
     color: '#999',
     fontSize: 14,
     paddingHorizontal: 24,
+  },
+  resetButton: {
+    alignItems: 'center',
+    paddingVertical: 14,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: '#ddd',
+  },
+  resetText: {
+    color: '#c0392b',
+    fontSize: 15,
+    fontWeight: '600',
   },
   backdrop: {
     flex: 1,

@@ -17,7 +17,7 @@ import {
 } from 'react-native';
 import * as db from '../db';
 import { subscribeRemoteUpdate } from '../remoteUpdates';
-import { createShare, fetchShare } from '../syncClient';
+import { createShare, fetchShare, shareExists } from '../syncClient';
 import { pushTodoListIfShared, refreshSyncConnections } from '../syncManager';
 import { Task, TodoList } from '../types';
 import EnterKeyModal from './EnterKeyModal';
@@ -370,6 +370,26 @@ export default function TodoSection() {
     setJoinVisible(true);
   };
 
+  const confirmDeleteAllLists = () => {
+    setAddMenuVisible(false);
+    Alert.alert(
+      'Delete all lists',
+      'Delete every todo list and all of their tasks? This cannot be undone. Copies of shared lists on other devices are not affected.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete All',
+          style: 'destructive',
+          onPress: () => {
+            db.deleteAllLists();
+            refreshLists();
+            refreshSyncConnections();
+          },
+        },
+      ]
+    );
+  };
+
   const joinSharedList = async (key: string) => {
     const snapshot = await fetchShare(key);
     if (snapshot.kind !== 'todo') {
@@ -413,15 +433,12 @@ export default function TodoSection() {
     setRenamingList(null);
   };
 
-  const shareList = async (list: TodoList) => {
-    if (list.shareKey) {
-      setRenamingList(null);
-      setShareKeyShown(list.shareKey);
-      return;
-    }
+  /** Creates a fresh share for a list (first share or replacing a stale
+   *  key), seeds it with current content, and shows the new key. */
+  const createNewShare = async (list: TodoList) => {
     setShareBusy(true);
     try {
-      const snapshot = await createShare('todo', list.name, db.getTasksAsSyncItems(list.id) as unknown as Record<string, unknown>[]);
+      const snapshot = await createShare('todo', list.name, db.getTaskSyncRecords(list.id) as unknown as Record<string, unknown>[]);
       db.setListShareKey(list.id, snapshot.key, snapshot.version);
       refreshLists();
       await refreshSyncConnections();
@@ -432,6 +449,65 @@ export default function TodoSection() {
     } finally {
       setShareBusy(false);
     }
+  };
+
+  const shareList = async (list: TodoList) => {
+    if (!list.shareKey) {
+      await createNewShare(list);
+      return;
+    }
+    // View Key: verify the share still exists before showing a key that no
+    // longer works. Fail open - an unreachable server is not a dead share.
+    const key = list.shareKey;
+    let exists = true;
+    setShareBusy(true);
+    try {
+      exists = await shareExists(key);
+    } catch {
+      // Could not verify (offline, server down); behave as before.
+    } finally {
+      setShareBusy(false);
+    }
+    setRenamingList(null);
+    if (exists) {
+      setShareKeyShown(key);
+      return;
+    }
+    Alert.alert(
+      'Share no longer exists',
+      'The server does not recognize this key anymore - the server data was reset, or the share expired after 30 days without updates. Your list is safe on this device, but it is not syncing.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Unshare',
+          onPress: () => {
+            db.detachList(list.id);
+            refreshLists();
+            refreshSyncConnections();
+          },
+        },
+        { text: 'New Key', onPress: () => void createNewShare(list) },
+      ]
+    );
+  };
+
+  const confirmDetachList = (list: TodoList) => {
+    setRenamingList(null);
+    Alert.alert(
+      'Stop syncing',
+      `Keep "${list.name}" on this device but disconnect it from the shared copy? Other users keep the list and can continue sharing it.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Unshare',
+          onPress: () => {
+            db.detachList(list.id);
+            refreshLists();
+            refreshSyncConnections();
+          },
+        },
+      ]
+    );
   };
 
   const confirmDeleteList = (list: TodoList) => {
@@ -650,6 +726,15 @@ export default function TodoSection() {
                     {renamingList?.shareKey ? 'View Key' : 'Share'}
                   </Text>
                 </Pressable>
+                {renamingList?.shareKey != null && (
+                  <Pressable
+                    onPress={() => renamingList && confirmDetachList(renamingList)}
+                    style={styles.renameButton}
+                    disabled={shareBusy}
+                  >
+                    <Text style={styles.shareText}>Unshare</Text>
+                  </Pressable>
+                )}
                 <View style={styles.renameSpacer} />
                 <Pressable onPress={() => setRenamingList(null)} style={styles.renameButton}>
                   <Text style={styles.cancelText}>Cancel</Text>
@@ -678,6 +763,10 @@ export default function TodoSection() {
             <View style={styles.menuDivider} />
             <Pressable style={styles.menuItem} onPress={startJoinList}>
               <Text style={styles.menuText}>Join Shared List</Text>
+            </Pressable>
+            <View style={styles.menuDivider} />
+            <Pressable style={styles.menuItem} onPress={confirmDeleteAllLists}>
+              <Text style={styles.menuDangerText}>Delete All Lists</Text>
             </Pressable>
           </View>
         </Pressable>
@@ -903,6 +992,10 @@ const styles = StyleSheet.create({
   menuText: {
     fontSize: 15,
     color: '#222',
+  },
+  menuDangerText: {
+    fontSize: 15,
+    color: '#c0392b',
   },
   menuDivider: {
     height: StyleSheet.hairlineWidth,
