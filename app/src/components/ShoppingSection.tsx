@@ -84,6 +84,7 @@ export default function ShoppingSection() {
         db.getShoppingItemsAsSyncItems() as unknown as Record<string, unknown>[]
       );
       db.setSetting(SHOPPING_SHARE_KEY_SETTING, snapshot.key);
+      db.bindShoppingShare(snapshot.version);
       await refreshSyncConnections();
       setMenuOpen(false);
       setShareKeyShown(snapshot.key);
@@ -99,9 +100,16 @@ export default function ShoppingSection() {
     if (snapshot.kind !== 'shopping') {
       throw new Error('That key belongs to a todo list, not the shopping list.');
     }
-    db.clearAllShoppingItems();
-    db.applySyncedShoppingItems(snapshot.items as unknown as db.SyncShoppingItem[]);
-    db.setSetting(SHOPPING_SHARE_KEY_SETTING, key);
+    // Re-entering the key we're already bound to must not wipe local edits
+    // the live sync path hasn't pushed yet; the connection reconciles them.
+    if (db.getSetting(SHOPPING_SHARE_KEY_SETTING) !== key) {
+      db.clearAllShoppingItems();
+      db.applySyncedShoppingItems(
+        snapshot.items as unknown as db.SyncShoppingItem[],
+        snapshot.version
+      );
+      db.setSetting(SHOPPING_SHARE_KEY_SETTING, key);
+    }
     refresh();
     await refreshSyncConnections();
     setJoinVisible(false);

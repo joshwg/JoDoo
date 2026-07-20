@@ -1,5 +1,9 @@
 # Jodoo
 
+Jodoo is a to-do and shopping list app built around gestures: most actions are a swipe, a drag, or a touch-and-hold rather than a menu. Swipe left or right anywhere on a to-do list to switch between your lists, and swipe with two fingers to jump straight to the Shopping section. Tasks aren't stuck where you created them — drag a task by its handle up onto another list's tab to move it there. Touch and hold a tab to rename or delete that list.
+
+If you use a server then you can share your lists with other JoDoo users. Everything uses shares secrets so to make sharing simple.  Just copy a list identifier, share with a friend and they work collaboratively with you on the list. If you change something they see it. If you change something they see it.
+
 A simple Android to-do and shopping list app. No accounts, no passwords — everything is stored locally on the device in SQLite.
 
 Built with Expo (React Native + TypeScript), following the same WSL + EAS workflow as `flightscan/apps/mobile`.

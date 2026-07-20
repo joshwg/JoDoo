@@ -11,7 +11,7 @@ lists so peers can converge on the same content in real time.
 JODOO_SERVER_KEY=<at-least-20-char-secret> DATA_DIR=/var/lib/jodoo go run .
 ```
 
-For example (do not reuse this value - generate your own):
+For example (DO NOT USE THE SAMPLE KEY FOR YOUR SERVER):
 
 ```
 JODOO_SERVER_KEY=8f3e2a9c1d7b4f6081ac5e2b3d9f1a7c DATA_DIR=/var/lib/jodoo go run .
@@ -26,6 +26,19 @@ Env vars:
 - `PORT` (default `8080`): plain HTTP port to listen on.
 - `DATA_DIR` (default `./data`): directory holding `jodoo.db` (SQLite), the
   persistent-but-temporary store of shared lists.
+
+Flags:
+
+- `--version`: print version and build information (Go version, git commit,
+  commit date) and exit. Works without any env vars set:
+
+  ```
+  $ ./server --version
+  jodoo-server v1.1.1
+    go:      go1.26.4 (linux/amd64)
+    commit:  c18d01913340
+    from:    2026-07-19T22:41:20Z
+  ```
 
 ## TLS
 

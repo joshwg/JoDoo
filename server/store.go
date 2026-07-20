@@ -136,10 +136,19 @@ func (s *Store) Create(kind ListKind, name string, items []Item) (*Share, error)
 // Update replaces the name/items of an existing share and bumps its version.
 // The whole list is replaced wholesale (last-write-wins) rather than merged,
 // since the server only keeps a temporary copy to aid synchronization.
-func (s *Store) Update(key, name string, items []Item) (*Share, error) {
+// updatedAt is the editing client's own edit time, relayed so that conflict
+// tie-breaks on other devices compare device clocks against device clocks; a
+// zero value (older clients) or a future-skewed clock falls back to/clamps
+// at server time so one bad clock can't poison the share's timeline.
+func (s *Store) Update(key, name string, items []Item, updatedAt time.Time) (*Share, error) {
 	itemsJSON, err := json.Marshal(items)
 	if err != nil {
 		return nil, err
+	}
+
+	now := time.Now().UTC()
+	if updatedAt.IsZero() || updatedAt.After(now) {
+		updatedAt = now
 	}
 
 	tx, err := s.db.Begin()
@@ -150,7 +159,7 @@ func (s *Store) Update(key, name string, items []Item) (*Share, error) {
 
 	res, err := tx.Exec(
 		`UPDATE shares SET name = ?, items_json = ?, version = version + 1, updated_at = ? WHERE key = ?`,
-		name, string(itemsJSON), time.Now().UTC().Format(time.RFC3339Nano), key,
+		name, string(itemsJSON), updatedAt.UTC().Format(time.RFC3339Nano), key,
 	)
 	if err != nil {
 		return nil, err

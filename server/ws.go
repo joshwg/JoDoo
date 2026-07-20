@@ -31,8 +31,7 @@ const (
 // real time.
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
-	sh, err := s.store.Get(key)
-	if err != nil {
+	if _, err := s.store.Get(key); err != nil {
 		if errors.Is(err, ErrNotFound) {
 			writeError(w, http.StatusNotFound, "unknown share key")
 			return
@@ -55,7 +54,23 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	go s.wsWriter(conn, c, done)
 
 	// Send the initial snapshot so the joining client can render immediately.
-	c.send <- wsMessage{Type: "snapshot", Version: sh.Version, Name: sh.Name, Items: sh.Items}
+	// The share is re-read here, AFTER joining the room: an update committed
+	// between the validation read above and join would otherwise be missed
+	// entirely (its broadcast preceded our membership, and the earlier read
+	// predates it). Updates after join reach us via broadcast; if both
+	// deliver, clients ignore the older-version frame. trySend keeps this
+	// from blocking forever should the writer have already died with a full
+	// channel - the queued broadcasts carry state at least as fresh.
+	if sh, err := s.store.Get(key); err == nil {
+		c.trySend(snapshotMessage(sh))
+	} else {
+		// A connected client that never received a snapshot would look
+		// healthy yet never reconcile (clients arbitrate only on incoming
+		// frames); drop the connection so its reconnect loop retries.
+		log.Printf("initial snapshot: %v", err)
+		close(done)
+		return
+	}
 
 	s.wsReader(conn, key, c)
 	close(done)
@@ -110,18 +125,18 @@ func (s *Server) wsReader(conn *websocket.Conn, key string, c *wsClient) {
 		if items == nil {
 			items = []Item{}
 		}
-		sh, err := s.store.Update(key, msg.Name, items)
+		sh, err := s.store.Update(key, msg.Name, items, msg.UpdatedAt)
 		if err != nil {
 			if errors.Is(err, ErrNotFound) {
-				c.send <- wsMessage{Type: "error", Message: "unknown share key"}
+				c.trySend(wsMessage{Type: "error", Message: "unknown share key"})
 				continue
 			}
 			log.Printf("update share: %v", err)
-			c.send <- wsMessage{Type: "error", Message: "could not save update"}
+			c.trySend(wsMessage{Type: "error", Message: "could not save update"})
 			continue
 		}
 		// Broadcast to every peer (including the sender) so everyone
 		// converges on the same version/content.
-		s.hub.broadcast(key, wsMessage{Type: "snapshot", Version: sh.Version, Name: sh.Name, Items: sh.Items})
+		s.hub.broadcast(key, snapshotMessage(sh))
 	}
 }

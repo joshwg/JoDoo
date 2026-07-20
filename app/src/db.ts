@@ -52,6 +52,13 @@ export function initDb(): void {
 
   // Migrations for list/task sharing support (added after first release).
   ensureColumn('lists', 'share_key', 'TEXT');
+  // Sync state per list: the server version last adopted from a snapshot, a
+  // dirty flag set by every local edit and cleared when the server
+  // acknowledges our content, and the wall-clock time of the last local edit
+  // (only consulted as a tie-break for genuine concurrent-edit conflicts).
+  ensureColumn('lists', 'synced_version', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn('lists', 'dirty', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn('lists', 'updated_at', "TEXT NOT NULL DEFAULT ''");
   ensureColumn('tasks', 'uuid', 'TEXT');
   ensureColumn('shopping_items', 'uuid', 'TEXT');
   // Backfill any pre-existing rows that predate the uuid column.
@@ -116,6 +123,110 @@ export function deleteSetting(key: string): void {
   db.runSync('DELETE FROM settings WHERE key = ?', key);
 }
 
+// ---------- Sync state ----------
+//
+// Arbitration between local and remote copies of a shared list rests on the
+// server's monotonically increasing version counter plus a local dirty flag,
+// not on comparing clocks. Wall-clock timestamps are recorded on local edits
+// only as a tie-break for genuine concurrent-edit conflicts, where any
+// choice is defensible.
+
+/**
+ * Parses an ISO/RFC3339 timestamp to epoch milliseconds. Go's RFC3339Nano
+ * trims trailing zeros so fractional seconds arrive with 1-9 digits, while
+ * ECMA-262 only guarantees parsing of exactly 3; normalize before parsing.
+ * Blank/bad input parses as 0, i.e. "older than everything".
+ */
+export function parseSyncTimestamp(ts: string): number {
+  if (!ts) return 0;
+  const ms = Date.parse(ts.replace(/\.(\d+)/, (_, f: string) => '.' + (f + '00').slice(0, 3)));
+  return Number.isNaN(ms) ? 0 : ms;
+}
+
+/** Sync-arbitration state shared by todo lists and the shopping list.
+ *  `updatedAt` is the wall-clock time of the last local edit and is only
+ *  meaningful while `dirty`. */
+export interface SyncState {
+  syncedVersion: number;
+  dirty: boolean;
+  updatedAt: string;
+}
+
+/** {@link SyncState} plus the list fields the arbitration handlers need. */
+export interface ListSyncState extends SyncState {
+  name: string;
+  shareKey: string | null;
+}
+
+export function getListSyncState(listId: number): ListSyncState | null {
+  const row = db.getFirstSync<{
+    name: string;
+    share_key: string | null;
+    synced_version: number;
+    dirty: number;
+    updated_at: string;
+  }>('SELECT name, share_key, synced_version, dirty, updated_at FROM lists WHERE id = ?', listId);
+  if (!row) return null;
+  return {
+    name: row.name,
+    shareKey: row.share_key,
+    syncedVersion: row.synced_version,
+    dirty: row.dirty === 1,
+    updatedAt: row.updated_at,
+  };
+}
+
+/** Records "this list's content just changed locally". */
+function markListDirty(listId: number): void {
+  db.runSync(
+    'UPDATE lists SET dirty = 1, updated_at = ? WHERE id = ?',
+    new Date().toISOString(),
+    listId
+  );
+}
+
+/** Like {@link markListDirty}, looked up via one of the list's tasks; must
+ *  be called while the task row still exists. */
+function markListOfTaskDirty(taskId: number): void {
+  db.runSync(
+    'UPDATE lists SET dirty = 1, updated_at = ? WHERE id = (SELECT list_id FROM tasks WHERE id = ?)',
+    new Date().toISOString(),
+    taskId
+  );
+}
+
+const SHOPPING_SYNCED_VERSION_SETTING = 'shopping_synced_version';
+const SHOPPING_DIRTY_SETTING = 'shopping_dirty';
+const SHOPPING_UPDATED_AT_SETTING = 'shopping_updated_at';
+
+export function getShoppingSyncState(): SyncState {
+  return {
+    // `|| 0` also shields against a corrupted non-numeric setting (NaN).
+    syncedVersion: Number(getSetting(SHOPPING_SYNCED_VERSION_SETTING) ?? 0) || 0,
+    dirty: getSetting(SHOPPING_DIRTY_SETTING) === '1',
+    updatedAt: getSetting(SHOPPING_UPDATED_AT_SETTING) ?? '',
+  };
+}
+
+function markShoppingDirty(): void {
+  db.runSync(
+    'INSERT INTO settings (key, value) VALUES (?, ?), (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+    SHOPPING_DIRTY_SETTING,
+    '1',
+    SHOPPING_UPDATED_AT_SETTING,
+    new Date().toISOString()
+  );
+}
+
+/** Records the shopping list's server binding right after creating the
+ *  share: the server was seeded with our current items, so its version is
+ *  adopted as clean - otherwise the first incoming snapshot would be
+ *  arbitrated as a conflict against pre-share dirty state. */
+export function bindShoppingShare(version: number): void {
+  setSetting(SHOPPING_SYNCED_VERSION_SETTING, String(version));
+  setSetting(SHOPPING_DIRTY_SETTING, '0');
+}
+
 
 // ---------- Lists ----------
 
@@ -160,6 +271,8 @@ export function createJoinedList(name: string, shareKey: string): TodoList {
   const pos = db.getFirstSync<{ p: number }>(
     'SELECT COALESCE(MAX(position), 0) + 1 AS p FROM lists'
   )!.p;
+  // synced_version starts at 0 and dirty at 0, so the share's first
+  // incoming snapshot (version >= 1) always applies.
   const res = db.runSync(
     'INSERT INTO lists (name, position, share_key) VALUES (?, ?, ?)',
     name,
@@ -169,13 +282,22 @@ export function createJoinedList(name: string, shareKey: string): TodoList {
   return { id: Number(res.lastInsertRowId), name, position: pos, shareKey };
 }
 
-/** Marks an existing list as shared once the owner has generated a key for it. */
-export function setListShareKey(id: number, shareKey: string): void {
-  db.runSync('UPDATE lists SET share_key = ? WHERE id = ?', shareKey, id);
+/** Marks an existing list as shared once the owner has generated a key for
+ *  it. The server share was seeded with this list's current content, so its
+ *  version is adopted and the list starts clean - and any stale sync state
+ *  from a previous binding is overwritten. */
+export function setListShareKey(id: number, shareKey: string, syncedVersion: number): void {
+  db.runSync(
+    'UPDATE lists SET share_key = ?, synced_version = ?, dirty = 0 WHERE id = ?',
+    shareKey,
+    syncedVersion,
+    id
+  );
 }
 
 export function renameList(id: number, name: string): void {
   db.runSync('UPDATE lists SET name = ? WHERE id = ?', name.trim(), id);
+  markListDirty(id);
 }
 
 /** Persists a new list order (used by drag-to-reorder tabs in the UI). */
@@ -255,6 +377,7 @@ export function createTask(
     colorIndex,
     position
   );
+  markListDirty(listId);
 }
 
 export function updateTask(
@@ -270,15 +393,19 @@ export function updateTask(
     dueDate,
     id
   );
+  markListOfTaskDirty(id);
 }
 
 export function setTaskDone(id: number, done: boolean): void {
   db.runSync('UPDATE tasks SET done = ? WHERE id = ?', done ? 1 : 0, id);
+  markListOfTaskDirty(id);
 }
 
 /** Moves a task to a different list (used by drag-and-drop in the UI); it is
  *  appended to the end of the destination list. */
 export function moveTaskToList(id: number, newListId: number): void {
+  // Mark the source list while the task still points at it.
+  markListOfTaskDirty(id);
   const position = db.getFirstSync<{ p: number }>(
     'SELECT COALESCE(MAX(position), -1) + 1 AS p FROM tasks WHERE list_id = ?',
     newListId
@@ -289,6 +416,7 @@ export function moveTaskToList(id: number, newListId: number): void {
     position,
     id
   );
+  markListDirty(newListId);
 }
 
 /** Persists a new task order within a list (used by drag-to-reorder in the UI). */
@@ -298,9 +426,12 @@ export function reorderTasks(listId: number, orderedIds: number[]): void {
       db.runSync('UPDATE tasks SET position = ? WHERE id = ? AND list_id = ?', index, id, listId);
     });
   });
+  markListDirty(listId);
 }
 
 export function deleteTask(id: number): void {
+  // Mark first: the list lookup needs the task row to still exist.
+  markListOfTaskDirty(id);
   db.runSync('DELETE FROM tasks WHERE id = ?', id);
 }
 
@@ -328,14 +459,38 @@ export function getTasksAsSyncItems(listId: number): SyncTaskItem[] {
   }));
 }
 
+/** Canonical content fingerprint for comparing a local list against a
+ *  snapshot. Projects each item onto a fixed field order because the server
+ *  stores items as opaque maps and re-serializes their keys alphabetically,
+ *  so raw JSON comparison would always mismatch. Must enumerate exactly the
+ *  fields of {@link SyncTaskItem}. */
+export function taskFingerprint(items: SyncTaskItem[]): string {
+  return JSON.stringify(
+    items.map((i) => [i.uuid, i.title, i.description, i.dueDate ?? null, i.colorIndex, !!i.done])
+  );
+}
+
 /**
- * Replaces a list's tasks with a snapshot received from the sync server.
- * Tasks are matched by `uuid`: known uuids are updated in place, unknown
- * ones are inserted, and local tasks whose uuid is missing from the
- * snapshot are deleted (the server always sends the whole list).
+ * Replaces a list's name and tasks with a snapshot received from the sync
+ * server, adopts the snapshot's server version (never moving backwards), and
+ * clears the dirty flag - the server now holds this content. Tasks are
+ * matched by `uuid`: known uuids are updated in place, unknown ones are
+ * inserted, and local tasks whose uuid is missing from the snapshot are
+ * deleted (the server always sends the whole list).
  */
-export function applySyncedTasks(listId: number, items: SyncTaskItem[]): void {
+export function applySyncedTasks(
+  listId: number,
+  name: string,
+  items: SyncTaskItem[],
+  version: number
+): void {
   db.withTransactionSync(() => {
+    db.runSync(
+      "UPDATE lists SET name = COALESCE(NULLIF(?, ''), name), synced_version = MAX(synced_version, ?), dirty = 0 WHERE id = ?",
+      name,
+      version,
+      listId
+    );
     const existing = db.getAllSync<{ id: number; uuid: string }>(
       'SELECT id, uuid FROM tasks WHERE list_id = ?',
       listId
@@ -346,13 +501,18 @@ export function applySyncedTasks(listId: number, items: SyncTaskItem[]): void {
       if (!item.uuid) return;
       seen.add(item.uuid);
       const existingId = byUuid.get(item.uuid);
+      // Items arrive via an untyped relay from other builds; default any
+      // missing field rather than letting one bad item abort every apply.
+      const title = String(item.title ?? '');
+      const description = String(item.description ?? '');
+      const dueDate = item.dueDate ?? null;
       const colorIndex = Number.isFinite(item.colorIndex) ? item.colorIndex : index % 8;
       if (existingId != null) {
         db.runSync(
           'UPDATE tasks SET title = ?, description = ?, due_date = ?, color_index = ?, done = ?, position = ? WHERE id = ?',
-          item.title,
-          item.description,
-          item.dueDate,
+          title,
+          description,
+          dueDate,
           colorIndex,
           item.done ? 1 : 0,
           index,
@@ -363,9 +523,9 @@ export function applySyncedTasks(listId: number, items: SyncTaskItem[]): void {
           'INSERT INTO tasks (list_id, uuid, title, description, due_date, color_index, done, position) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
           listId,
           item.uuid,
-          item.title,
-          item.description,
-          item.dueDate,
+          title,
+          description,
+          dueDate,
           colorIndex,
           item.done ? 1 : 0,
           index
@@ -412,18 +572,22 @@ export function addShoppingItem(name: string): void {
     generateUuid(),
     pos
   );
+  markShoppingDirty();
 }
 
 export function setShoppingChecked(id: number, checked: boolean): void {
   db.runSync('UPDATE shopping_items SET checked = ? WHERE id = ?', checked ? 1 : 0, id);
+  markShoppingDirty();
 }
 
 export function deleteShoppingItem(id: number): void {
   db.runSync('DELETE FROM shopping_items WHERE id = ?', id);
+  markShoppingDirty();
 }
 
 export function clearCheckedShoppingItems(): void {
   db.runSync('DELETE FROM shopping_items WHERE checked = 1');
+  markShoppingDirty();
 }
 
 // ---------- Sync: shopping list snapshot export/apply ----------
@@ -438,10 +602,18 @@ export function getShoppingItemsAsSyncItems(): SyncShoppingItem[] {
   return getShoppingItems().map((i) => ({ uuid: i.uuid, name: i.name, checked: i.checked }));
 }
 
+/** Like {@link taskFingerprint}, for {@link SyncShoppingItem}. */
+export function shoppingFingerprint(items: SyncShoppingItem[]): string {
+  return JSON.stringify(items.map((i) => [i.uuid, i.name, !!i.checked]));
+}
+
 /** Same reconciliation strategy as {@link applySyncedTasks}, for the single
- *  shopping list. */
-export function applySyncedShoppingItems(items: SyncShoppingItem[]): void {
+ *  shopping list; likewise adopts the server version and clears dirty. */
+export function applySyncedShoppingItems(items: SyncShoppingItem[], version: number): void {
   db.withTransactionSync(() => {
+    const current = Number(getSetting(SHOPPING_SYNCED_VERSION_SETTING) ?? 0);
+    setSetting(SHOPPING_SYNCED_VERSION_SETTING, String(Math.max(current, version)));
+    setSetting(SHOPPING_DIRTY_SETTING, '0');
     const existing = db.getAllSync<{ id: number; uuid: string }>(
       'SELECT id, uuid FROM shopping_items'
     );
@@ -451,10 +623,12 @@ export function applySyncedShoppingItems(items: SyncShoppingItem[]): void {
       if (!item.uuid) return;
       seen.add(item.uuid);
       const existingId = byUuid.get(item.uuid);
+      // Untyped relay: default missing fields, as in applySyncedTasks.
+      const name = String(item.name ?? '');
       if (existingId != null) {
         db.runSync(
           'UPDATE shopping_items SET name = ?, checked = ?, position = ? WHERE id = ?',
-          item.name,
+          name,
           item.checked ? 1 : 0,
           index,
           existingId
@@ -462,7 +636,7 @@ export function applySyncedShoppingItems(items: SyncShoppingItem[]): void {
       } else {
         db.runSync(
           'INSERT INTO shopping_items (name, uuid, checked, position) VALUES (?, ?, ?, ?)',
-          item.name,
+          name,
           item.uuid,
           item.checked ? 1 : 0,
           index
@@ -478,9 +652,13 @@ export function applySyncedShoppingItems(items: SyncShoppingItem[]): void {
 }
 
 /** Deletes every local shopping item; used right before adopting someone
- *  else's shared shopping list via its key. */
+ *  else's shared shopping list via its key. Resets the sync state so the new
+ *  share's first snapshot always applies. */
 export function clearAllShoppingItems(): void {
   db.runSync('DELETE FROM shopping_items');
+  deleteSetting(SHOPPING_SYNCED_VERSION_SETTING);
+  deleteSetting(SHOPPING_DIRTY_SETTING);
+  deleteSetting(SHOPPING_UPDATED_AT_SETTING);
 }
 
 

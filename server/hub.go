@@ -2,6 +2,7 @@ package main
 
 import (
 	"sync"
+	"time"
 )
 
 // wsMessage is the JSON envelope exchanged over a share's WebSocket
@@ -11,11 +12,30 @@ type wsMessage struct {
 	Version int64  `json:"version,omitempty"` // snapshot: server version; update: ignored
 	Name    string `json:"name,omitempty"`
 	Items   []Item `json:"items,omitempty"`
-	Message string `json:"message,omitempty"` // error only
+	// Snapshot: when the share's content was last edited; update: the
+	// sender's own edit time, relayed verbatim so clients' conflict
+	// tie-breaks compare device clocks against device clocks.
+	UpdatedAt time.Time `json:"updatedAt,omitzero"`
+	Message   string    `json:"message,omitempty"` // error only
+}
+
+// snapshotMessage builds the snapshot frame for a share; the single place
+// the snapshot wire shape is assembled (initial send and broadcast alike).
+func snapshotMessage(sh *Share) wsMessage {
+	return wsMessage{Type: "snapshot", Version: sh.Version, Name: sh.Name, Items: sh.Items, UpdatedAt: sh.UpdatedAt}
 }
 
 type wsClient struct {
 	send chan wsMessage
+}
+
+// trySend queues msg without blocking; the message is dropped if the client's
+// writer has fallen behind or died. Callers rely on this never blocking.
+func (c *wsClient) trySend(msg wsMessage) {
+	select {
+	case c.send <- msg:
+	default:
+	}
 }
 
 type room struct {
@@ -33,15 +53,18 @@ func NewHub() *Hub {
 	return &Hub{rooms: make(map[string]*room)}
 }
 
+// join and leave both hold the hub lock for the whole membership change, so
+// leave can never delete a room out of the map while join is adding a client
+// to it (which would leave that client in an orphaned room that no broadcast
+// can reach).
 func (h *Hub) join(key string, c *wsClient) {
 	h.mu.Lock()
+	defer h.mu.Unlock()
 	r, ok := h.rooms[key]
 	if !ok {
 		r = &room{clients: make(map[*wsClient]struct{})}
 		h.rooms[key] = r
 	}
-	h.mu.Unlock()
-
 	r.mu.Lock()
 	r.clients[c] = struct{}{}
 	r.mu.Unlock()
@@ -49,8 +72,8 @@ func (h *Hub) join(key string, c *wsClient) {
 
 func (h *Hub) leave(key string, c *wsClient) {
 	h.mu.Lock()
+	defer h.mu.Unlock()
 	r, ok := h.rooms[key]
-	h.mu.Unlock()
 	if !ok {
 		return
 	}
@@ -58,20 +81,8 @@ func (h *Hub) leave(key string, c *wsClient) {
 	delete(r.clients, c)
 	empty := len(r.clients) == 0
 	r.mu.Unlock()
-
 	if empty {
-		h.mu.Lock()
-		// Re-check under the hub lock in case another connection joined
-		// between our unlock above and this point.
-		if r2, ok := h.rooms[key]; ok {
-			r2.mu.Lock()
-			stillEmpty := len(r2.clients) == 0
-			r2.mu.Unlock()
-			if stillEmpty {
-				delete(h.rooms, key)
-			}
-		}
-		h.mu.Unlock()
+		delete(h.rooms, key)
 	}
 }
 
@@ -87,11 +98,8 @@ func (h *Hub) broadcast(key string, msg wsMessage) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for c := range r.clients {
-		select {
-		case c.send <- msg:
-		default:
-			// Slow consumer: drop the message rather than block every other
-			// peer in the room. The client's next update will resync it.
-		}
+		// Slow consumer: drop the message rather than block every other
+		// peer in the room. The client's next update will resync it.
+		c.trySend(msg)
 	}
 }

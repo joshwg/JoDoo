@@ -375,9 +375,26 @@ export default function TodoSection() {
     if (snapshot.kind !== 'todo') {
       throw new Error('That key belongs to a shopping list, not a todo list.');
     }
-    const created = db.createJoinedList(snapshot.name || 'Shared List', key);
-    db.applySyncedTasks(created.id, snapshot.items as unknown as db.SyncTaskItem[]);
-    refreshLists(created.id);
+    // Rejoining a share this device already has (e.g. retrying after a
+    // partial failure) must neither create a duplicate list nor force-apply
+    // the snapshot over local edits the live sync path hasn't pushed yet -
+    // the reopened connection arbitrates content properly.
+    const existing = db.getLists().find((l) => l.shareKey === key);
+    let targetId: number;
+    if (existing) {
+      targetId = existing.id;
+    } else {
+      const name = snapshot.name || 'Shared List';
+      const created = db.createJoinedList(name, key);
+      db.applySyncedTasks(
+        created.id,
+        name,
+        snapshot.items as unknown as db.SyncTaskItem[],
+        snapshot.version
+      );
+      targetId = created.id;
+    }
+    refreshLists(targetId);
     await refreshSyncConnections();
     setJoinVisible(false);
   };
@@ -405,7 +422,7 @@ export default function TodoSection() {
     setShareBusy(true);
     try {
       const snapshot = await createShare('todo', list.name, db.getTasksAsSyncItems(list.id) as unknown as Record<string, unknown>[]);
-      db.setListShareKey(list.id, snapshot.key);
+      db.setListShareKey(list.id, snapshot.key, snapshot.version);
       refreshLists();
       await refreshSyncConnections();
       setRenamingList(null);
