@@ -1,10 +1,15 @@
 import React, { useRef, useState } from 'react';
-import { Animated, PanResponder, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Animated, PanResponder, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 import { postItColor } from '../colors';
 import { formatIso, isOverdue } from '../dates';
 import { Task } from '../types';
 
 const DOUBLE_TAP_MS = 300;
+
+/** Task-row controls (checkbox, edit, delete, drag handle) render at double
+ *  size on iPad, where the phone-tuned targets are too small to hit
+ *  comfortably. */
+const CONTROL_SCALE = Platform.OS === 'ios' && Platform.isPad ? 2 : 1;
 
 interface Props {
   task: Task;
@@ -173,9 +178,9 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   checkbox: {
-    width: 22,
-    height: 22,
-    borderRadius: 4,
+    width: 22 * CONTROL_SCALE,
+    height: 22 * CONTROL_SCALE,
+    borderRadius: 4 * CONTROL_SCALE,
     borderWidth: 1.5,
     borderColor: 'rgba(0,0,0,0.45)',
     alignItems: 'center',
@@ -183,7 +188,7 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255,255,255,0.5)',
   },
   checkboxMark: {
-    fontSize: 14,
+    fontSize: 14 * CONTROL_SCALE,
     fontWeight: 'bold',
     color: '#333',
   },
@@ -199,11 +204,11 @@ const styles = StyleSheet.create({
     paddingHorizontal: 2,
   },
   editIcon: {
-    fontSize: 16,
+    fontSize: 16 * CONTROL_SCALE,
     color: 'rgba(0,0,0,0.45)',
   },
   delete: {
-    fontSize: 16,
+    fontSize: 16 * CONTROL_SCALE,
     color: 'rgba(0,0,0,0.4)',
     paddingHorizontal: 4,
   },
@@ -212,7 +217,7 @@ const styles = StyleSheet.create({
     paddingVertical: 2,
   },
   dragHandleIcon: {
-    fontSize: 16,
+    fontSize: 16 * CONTROL_SCALE,
     color: 'rgba(0,0,0,0.35)',
   },
   description: {

@@ -301,7 +301,16 @@ export default function TodoSection() {
         const current = listsRef.current;
         const withoutDragged = current.filter((l) => l.id !== list.id);
         const targetIndex = withoutDragged.findIndex((l) => l.id === overId);
-        const insertAt = targetIndex === -1 ? withoutDragged.length : targetIndex;
+        // Dragging right drops AFTER the hovered tab, dragging left drops
+        // BEFORE it - so the dragged tab takes the hovered tab's place in
+        // both directions, and dropping on the last tab from the left makes
+        // the dragged list the last one.
+        const fromIndex = current.findIndex((l) => l.id === list.id);
+        const toIndex = current.findIndex((l) => l.id === overId);
+        let insertAt = targetIndex === -1 ? withoutDragged.length : targetIndex;
+        if (targetIndex !== -1 && fromIndex !== -1 && fromIndex < toIndex) {
+          insertAt = targetIndex + 1;
+        }
         withoutDragged.splice(insertAt, 0, list);
         db.reorderLists(withoutDragged.map((l) => l.id));
         refreshLists(list.id);
