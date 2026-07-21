@@ -41,3 +41,9 @@ Uses EAS (cloud build, no local Android SDK needed):
 ```bash
 npx eas build -p android --profile preview
 ```
+
+## Running it on your own iOS device
+
+[`docs/ios-device-setup.md`](docs/ios-device-setup.md) covers standing the app
+up on an iPhone or iPad under your own Apple Developer account, from a fresh
+clone, without going through the App Store.
