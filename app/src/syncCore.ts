@@ -84,6 +84,9 @@ export interface SyncShoppingItem {
   checked: boolean;
   position: number;
   updatedAt: string;
+  /** Optional free-form quantity, e.g. "12" or "1.2 pounds"; null/absent
+   *  shows no amount. */
+  amount?: string | null;
   deleted?: boolean;
 }
 
@@ -97,13 +100,22 @@ export function normalizeShoppingItems(items: SyncShoppingItem[]): SyncShoppingI
       checked: !!i.checked,
       position: Number.isFinite(i.position) ? i.position : index,
       updatedAt: typeof i.updatedAt === 'string' ? i.updatedAt : '',
+      amount: typeof i.amount === 'string' && i.amount !== '' ? i.amount : null,
       ...(i.deleted === true ? { deleted: true } : {}),
     }));
 }
 
 /** Shopping counterpart of {@link taskRecordKey}. */
 export function shoppingRecordKey(i: SyncShoppingItem): string {
-  return JSON.stringify([i.uuid, i.name, !!i.checked, i.position, i.updatedAt, i.deleted === true]);
+  return JSON.stringify([
+    i.uuid,
+    i.name,
+    !!i.checked,
+    i.position,
+    i.updatedAt,
+    i.amount ?? null,
+    i.deleted === true,
+  ]);
 }
 
 /** Like {@link taskFingerprint}, for {@link SyncShoppingItem}. */

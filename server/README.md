@@ -39,7 +39,7 @@ Flags:
 
   ```
   $ ./jodoo-server --version
-  jodoo-server v1.2.0
+  jodoo-server v1.2.1
     go:      go1.26.4 (linux/amd64)
     commit:  c18d01913340
     from:    2026-07-19T22:41:20Z

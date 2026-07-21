@@ -3,13 +3,13 @@ import React, { useEffect, useState } from 'react';
 import {
   KeyboardAvoidingView,
   Modal,
-  Platform,
   Pressable,
   StyleSheet,
   Text,
   TextInput,
   View,
 } from 'react-native';
+import * as db from '../db';
 import { defaultDueDate, formatIso, fromIso, todayIso, toIso } from '../dates';
 import { Task } from '../types';
 
@@ -43,7 +43,7 @@ export default function TaskEditorModal({ visible, task, onSave, onCancel }: Pro
     <Modal visible={visible} transparent animationType="fade" onRequestClose={onCancel}>
       <KeyboardAvoidingView
         style={styles.backdrop}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        behavior="padding"
       >
         <View style={styles.sheet}>
           <Text style={styles.heading}>{task ? 'Edit Task' : 'New Task'}</Text>
@@ -54,6 +54,7 @@ export default function TaskEditorModal({ visible, task, onSave, onCancel }: Pro
             value={title}
             onChangeText={setTitle}
             autoFocus
+            maxLength={db.MAX_TASK_TITLE_LENGTH}
           />
           <TextInput
             style={[styles.input, styles.multiline]}
@@ -61,6 +62,7 @@ export default function TaskEditorModal({ visible, task, onSave, onCancel }: Pro
             value={description}
             onChangeText={setDescription}
             multiline
+            maxLength={db.MAX_TASK_DESCRIPTION_LENGTH}
           />
 
           <View style={styles.dateRow}>

@@ -17,14 +17,7 @@ export * from './syncCore';
 
 const db = SQLite.openDatabaseSync('jodoo.db');
 
-/** Adds `column` to `table` if it isn't already there (SQLite has no
- *  "ADD COLUMN IF NOT EXISTS", so we check PRAGMA table_info first). */
-function ensureColumn(table: string, column: string, definition: string): void {
-  const cols = db.getAllSync<{ name: string }>(`PRAGMA table_info(${table})`);
-  if (!cols.some((c) => c.name === column)) {
-    db.execSync(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
-  }
-}
+
 
 export function initDb(): void {
   db.execSync(`
@@ -32,23 +25,33 @@ export function initDb(): void {
     CREATE TABLE IF NOT EXISTS lists (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,
-      position INTEGER NOT NULL DEFAULT 0
+      position INTEGER NOT NULL DEFAULT 0,
+      share_key TEXT,
+      synced_version INTEGER NOT NULL DEFAULT 0,
+      dirty INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL DEFAULT ''
     );
     CREATE TABLE IF NOT EXISTS tasks (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       list_id INTEGER NOT NULL REFERENCES lists(id) ON DELETE CASCADE,
+      uuid TEXT,
       title TEXT NOT NULL,
       description TEXT NOT NULL DEFAULT '',
       due_date TEXT,
       color_index INTEGER NOT NULL DEFAULT 0,
       done INTEGER NOT NULL DEFAULT 0,
-      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      position INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL DEFAULT ''
     );
     CREATE TABLE IF NOT EXISTS shopping_items (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
+      uuid TEXT,
       name TEXT NOT NULL,
       checked INTEGER NOT NULL DEFAULT 0,
-      position INTEGER NOT NULL DEFAULT 0
+      position INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL DEFAULT '',
+      amount TEXT
     );
     CREATE TABLE IF NOT EXISTS dictionary (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -68,42 +71,11 @@ export function initDb(): void {
     );
   `);
 
-  // Migrations for list/task sharing support (added after first release).
-  ensureColumn('lists', 'share_key', 'TEXT');
-  // Sync state per list: the server version last adopted from a snapshot, a
-  // dirty flag set by every local edit and cleared when the server
-  // acknowledges our content, and the wall-clock time of the last local edit
-  // (only consulted as a tie-break for genuine concurrent-edit conflicts).
-  ensureColumn('lists', 'synced_version', 'INTEGER NOT NULL DEFAULT 0');
-  ensureColumn('lists', 'dirty', 'INTEGER NOT NULL DEFAULT 0');
-  ensureColumn('lists', 'updated_at', "TEXT NOT NULL DEFAULT ''");
-  ensureColumn('tasks', 'uuid', 'TEXT');
-  ensureColumn('shopping_items', 'uuid', 'TEXT');
-  // Per-item edit time, the basis for item-level last-write-wins merging of
-  // shared lists. Blank means "older than any real edit".
-  ensureColumn('tasks', 'updated_at', "TEXT NOT NULL DEFAULT ''");
-  ensureColumn('shopping_items', 'updated_at', "TEXT NOT NULL DEFAULT ''");
-  // Backfill any pre-existing rows that predate the uuid column.
-  for (const row of db.getAllSync<{ id: number }>('SELECT id FROM tasks WHERE uuid IS NULL')) {
-    db.runSync('UPDATE tasks SET uuid = ? WHERE id = ?', generateUuid(), row.id);
-  }
-  for (const row of db.getAllSync<{ id: number }>(
-    'SELECT id FROM shopping_items WHERE uuid IS NULL'
-  )) {
-    db.runSync('UPDATE shopping_items SET uuid = ? WHERE id = ?', generateUuid(), row.id);
-  }
-
-  // Migration: explicit per-list task ordering (added to support drag-to-reorder).
-  ensureColumn('tasks', 'position', 'INTEGER NOT NULL DEFAULT 0');
-  if (getSetting('_migrated_task_positions') !== '1') {
-    for (const list of db.getAllSync<{ id: number }>('SELECT id FROM lists')) {
-      const rows = db.getAllSync<{ id: number }>(
-        'SELECT id FROM tasks WHERE list_id = ? ORDER BY done, due_date IS NULL, due_date, id',
-        list.id
-      );
-      rows.forEach((row, i) => db.runSync('UPDATE tasks SET position = ? WHERE id = ?', i, row.id));
-    }
-    setSetting('_migrated_task_positions', '1');
+  // Migration: shopping_items.amount was added after initial release, so
+  // CREATE TABLE IF NOT EXISTS above won't add it to existing databases.
+  const shoppingCols = db.getAllSync<{ name: string }>('PRAGMA table_info(shopping_items)');
+  if (!shoppingCols.some((c) => c.name === 'amount')) {
+    db.execSync('ALTER TABLE shopping_items ADD COLUMN amount TEXT');
   }
 
   // Start the user off with one list so the To Do section is never empty.
@@ -434,6 +406,9 @@ export function getTasks(listId: number): Task[] {
     .map(toTask);
 }
 
+export const MAX_TASK_TITLE_LENGTH = 100;
+export const MAX_TASK_DESCRIPTION_LENGTH = 1000;
+
 export function createTask(
   listId: number,
   title: string,
@@ -453,8 +428,8 @@ export function createTask(
     'INSERT INTO tasks (list_id, uuid, title, description, due_date, color_index, position, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
     listId,
     generateUuid(),
-    title.trim(),
-    description.trim(),
+    title.trim().slice(0, MAX_TASK_TITLE_LENGTH),
+    description.trim().slice(0, MAX_TASK_DESCRIPTION_LENGTH),
     dueDate,
     colorIndex,
     position,
@@ -471,8 +446,8 @@ export function updateTask(
 ): void {
   db.runSync(
     'UPDATE tasks SET title = ?, description = ?, due_date = ?, updated_at = ? WHERE id = ?',
-    title.trim(),
-    description.trim(),
+    title.trim().slice(0, MAX_TASK_TITLE_LENGTH),
+    description.trim().slice(0, MAX_TASK_DESCRIPTION_LENGTH),
     dueDate,
     new Date().toISOString(),
     id
@@ -698,6 +673,7 @@ interface ShoppingRow {
   name: string;
   checked: number;
   position: number;
+  amount: string | null;
 }
 
 export function getShoppingItems(): ShoppingItem[] {
@@ -709,8 +685,12 @@ export function getShoppingItems(): ShoppingItem[] {
       name: r.name,
       checked: r.checked === 1,
       position: r.position,
+      amount: r.amount,
     }));
 }
+
+/** Shopping item names are kept short enough to read on one line. */
+export const MAX_SHOPPING_ITEM_NAME_LENGTH = 32;
 
 export function addShoppingItem(name: string): void {
   const pos = db.getFirstSync<{ p: number }>(
@@ -718,7 +698,7 @@ export function addShoppingItem(name: string): void {
   )!.p;
   db.runSync(
     'INSERT INTO shopping_items (name, uuid, position, updated_at) VALUES (?, ?, ?, ?)',
-    name.trim(),
+    name.trim().slice(0, MAX_SHOPPING_ITEM_NAME_LENGTH),
     generateUuid(),
     pos,
     new Date().toISOString()
@@ -730,6 +710,17 @@ export function setShoppingChecked(id: number, checked: boolean): void {
   db.runSync(
     'UPDATE shopping_items SET checked = ?, updated_at = ? WHERE id = ?',
     checked ? 1 : 0,
+    new Date().toISOString(),
+    id
+  );
+  markShoppingDirty();
+}
+
+/** Sets or clears (via null/empty) a shopping item's free-form amount. */
+export function setShoppingAmount(id: number, amount: string | null): void {
+  db.runSync(
+    'UPDATE shopping_items SET amount = ?, updated_at = ? WHERE id = ?',
+    amount && amount.trim() ? amount.trim() : null,
     new Date().toISOString(),
     id
   );
@@ -777,6 +768,7 @@ export function getShoppingSyncRecords(): SyncShoppingItem[] {
       checked: r.checked === 1,
       position: r.position,
       updatedAt: r.updated_at,
+      amount: r.amount,
     }));
   const tombstones: SyncShoppingItem[] = getTombstones(SHOPPING_SCOPE).map((t) => ({
     uuid: t.uuid,
@@ -784,6 +776,7 @@ export function getShoppingSyncRecords(): SyncShoppingItem[] {
     checked: false,
     position: 0,
     updatedAt: t.deleted_at,
+    amount: null,
     deleted: true,
   }));
   return [...live, ...tombstones];
@@ -820,21 +813,23 @@ export function applySyncedShoppingItems(
       }
       if (existingId != null) {
         db.runSync(
-          'UPDATE shopping_items SET name = ?, checked = ?, position = ?, updated_at = ? WHERE id = ?',
+          'UPDATE shopping_items SET name = ?, checked = ?, position = ?, updated_at = ?, amount = ? WHERE id = ?',
           item.name,
           item.checked ? 1 : 0,
           item.position,
           item.updatedAt,
+          item.amount ?? null,
           existingId
         );
       } else {
         db.runSync(
-          'INSERT INTO shopping_items (name, uuid, checked, position, updated_at) VALUES (?, ?, ?, ?, ?)',
+          'INSERT INTO shopping_items (name, uuid, checked, position, updated_at, amount) VALUES (?, ?, ?, ?, ?, ?)',
           item.name,
           item.uuid,
           item.checked ? 1 : 0,
           item.position,
-          item.updatedAt
+          item.updatedAt,
+          item.amount ?? null
         );
       }
       db.runSync(

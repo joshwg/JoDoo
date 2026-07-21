@@ -3,6 +3,7 @@ import {
   ActivityIndicator,
   Alert,
   FlatList,
+  KeyboardAvoidingView,
   Modal,
   Pressable,
   StyleSheet,
@@ -19,9 +20,11 @@ import {
   refreshSyncConnections,
   SHOPPING_SHARE_KEY_SETTING,
 } from '../syncManager';
+import { useTextSettings } from '../textSettings';
 import { DictionaryEntry, ShoppingItem } from '../types';
 import DictionaryModal from './DictionaryModal';
 import EnterKeyModal from './EnterKeyModal';
+import FontSettingsModal from './FontSettingsModal';
 import ServerSettingsModal from './ServerSettingsModal';
 import ShareKeyModal from './ShareKeyModal';
 
@@ -34,8 +37,12 @@ export default function ShoppingSection() {
   const [aboutOpen, setAboutOpen] = useState(false);
   const [joinVisible, setJoinVisible] = useState(false);
   const [serverSettingsVisible, setServerSettingsVisible] = useState(false);
+  const [fontSettingsVisible, setFontSettingsVisible] = useState(false);
   const [shareKeyShown, setShareKeyShown] = useState<string | null>(null);
   const [shareBusy, setShareBusy] = useState(false);
+  const [editingAmountItem, setEditingAmountItem] = useState<ShoppingItem | null>(null);
+  const [amountText, setAmountText] = useState('');
+  const { fontFamily, fontSize } = useTextSettings();
 
   const refresh = useCallback(() => setItems(db.getShoppingItems()), []);
 
@@ -65,6 +72,40 @@ export default function ShoppingSection() {
     db.addShoppingItem(trimmed);
     setNewItem('');
     setSuggestions([]);
+    refresh();
+    pushShoppingIfShared();
+  };
+
+  const isPlainCount = (amount: string) => /^\d+$/.test(amount);
+
+  /** Steps a plain integer amount by `delta`; clears it once it would hit
+   *  zero. Only meaningful for plain counts - free-form amounts like "1.2
+   *  pounds" are only ever set via the edit dialog. */
+  const bumpAmount = (item: ShoppingItem, delta: number) => {
+    const current = item.amount && isPlainCount(item.amount) ? parseInt(item.amount, 10) : 0;
+    const next = current + delta;
+    db.setShoppingAmount(item.id, next > 0 ? String(next) : null);
+    refresh();
+    pushShoppingIfShared();
+  };
+
+  const openAmountEditor = (item: ShoppingItem) => {
+    setEditingAmountItem(item);
+    setAmountText(item.amount ?? '');
+  };
+
+  const commitAmount = () => {
+    if (!editingAmountItem) return;
+    db.setShoppingAmount(editingAmountItem.id, amountText);
+    setEditingAmountItem(null);
+    refresh();
+    pushShoppingIfShared();
+  };
+
+  const clearAmount = () => {
+    if (!editingAmountItem) return;
+    db.setShoppingAmount(editingAmountItem.id, null);
+    setEditingAmountItem(null);
     refresh();
     pushShoppingIfShared();
   };
@@ -217,6 +258,7 @@ export default function ShoppingSection() {
           onSubmitEditing={() => addItem(newItem)}
           returnKeyType="done"
           blurOnSubmit={false}
+          maxLength={db.MAX_SHOPPING_ITEM_NAME_LENGTH}
         />
         <Pressable
           onPress={() => addItem(newItem)}
@@ -256,10 +298,49 @@ export default function ShoppingSection() {
               <View style={[styles.checkbox, item.checked && styles.checkboxChecked]}>
                 {item.checked && <Text style={styles.checkMark}>✓</Text>}
               </View>
-              <Text style={[styles.itemText, item.checked && styles.checkedText]}>
+              <Text
+                style={[
+                  styles.itemText,
+                  item.checked && styles.checkedText,
+                  { fontFamily, fontSize },
+                ]}
+                numberOfLines={1}
+              >
                 {item.name}
+                {item.amount != null && (
+                  <Text onPress={() => openAmountEditor(item)}> ({item.amount})</Text>
+                )}
               </Text>
             </Pressable>
+            <View style={styles.amountControls}>
+              {item.amount == null && (
+                <Pressable
+                  onPress={() => bumpAmount(item, 1)}
+                  hitSlop={8}
+                  accessibilityLabel="Set amount"
+                >
+                  <Text style={styles.amountBtn}>+</Text>
+                </Pressable>
+              )}
+              {item.amount != null && isPlainCount(item.amount) && (
+                <>
+                  <Pressable
+                    onPress={() => bumpAmount(item, -1)}
+                    hitSlop={8}
+                    accessibilityLabel="Decrease amount"
+                  >
+                    <Text style={styles.amountBtn}>−</Text>
+                  </Pressable>
+                  <Pressable
+                    onPress={() => bumpAmount(item, 1)}
+                    hitSlop={8}
+                    accessibilityLabel="Increase amount"
+                  >
+                    <Text style={styles.amountBtn}>+</Text>
+                  </Pressable>
+                </>
+              )}
+            </View>
             <Pressable
               onPress={() => {
                 db.deleteShoppingItem(item.id);
@@ -345,6 +426,16 @@ export default function ShoppingSection() {
               <Text style={styles.menuText}>Server Settings</Text>
             </Pressable>
             <View style={styles.menuDivider} />
+            <Pressable
+              style={styles.menuItem}
+              onPress={() => {
+                setMenuOpen(false);
+                setFontSettingsVisible(true);
+              }}
+            >
+              <Text style={styles.menuText}>Font Settings</Text>
+            </Pressable>
+            <View style={styles.menuDivider} />
             <Pressable style={styles.menuItem} onPress={confirmDeleteShoppingList}>
               <Text style={styles.menuDangerText}>Delete Shopping List</Text>
             </Pressable>
@@ -360,6 +451,45 @@ export default function ShoppingSection() {
             </Pressable>
           </View>
         </Pressable>
+      </Modal>
+
+      {/* Amount edit dialog. */}
+      <Modal
+        visible={editingAmountItem != null}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setEditingAmountItem(null)}
+      >
+        <KeyboardAvoidingView style={styles.amountBackdrop} behavior="padding">
+          <View style={styles.amountSheet}>
+            <Text style={styles.amountHeading}>Amount</Text>
+            <TextInput
+              style={styles.amountInput}
+              value={amountText}
+              onChangeText={setAmountText}
+              placeholder={`e.g. "12" or "1.2 pounds"`}
+              autoFocus
+              selectTextOnFocus
+              onSubmitEditing={commitAmount}
+              returnKeyType="done"
+            />
+            <View style={styles.amountActions}>
+              <Pressable onPress={clearAmount} style={styles.amountButton}>
+                <Text style={styles.amountClearText}>Clear</Text>
+              </Pressable>
+              <View style={styles.amountSpacer} />
+              <Pressable
+                onPress={() => setEditingAmountItem(null)}
+                style={styles.amountButton}
+              >
+                <Text style={styles.amountCancelText}>Cancel</Text>
+              </Pressable>
+              <Pressable onPress={commitAmount} style={styles.amountButton}>
+                <Text style={styles.amountSaveText}>Save</Text>
+              </Pressable>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
       </Modal>
 
       <DictionaryModal visible={dictionaryOpen} onClose={() => setDictionaryOpen(false)} />
@@ -381,6 +511,11 @@ export default function ShoppingSection() {
       <ServerSettingsModal
         visible={serverSettingsVisible}
         onClose={() => setServerSettingsVisible(false)}
+      />
+
+      <FontSettingsModal
+        visible={fontSettingsVisible}
+        onClose={() => setFontSettingsVisible(false)}
       />
 
       {/* About */}
@@ -525,6 +660,69 @@ const styles = StyleSheet.create({
     flex: 1,
     fontSize: 16,
     color: '#222',
+  },
+  amountControls: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 14,
+    paddingHorizontal: 6,
+  },
+  amountBtn: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: '#1a5fb4',
+    paddingHorizontal: 2,
+  },
+  amountBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    justifyContent: 'center',
+    padding: 32,
+  },
+  amountSheet: {
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    padding: 16,
+  },
+  amountHeading: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    marginBottom: 10,
+    color: '#222',
+  },
+  amountInput: {
+    borderWidth: 1,
+    borderColor: '#ccc',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    fontSize: 15,
+    color: '#222',
+  },
+  amountActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 16,
+  },
+  amountButton: {
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+  },
+  amountSpacer: {
+    flex: 1,
+  },
+  amountClearText: {
+    color: '#B00020',
+    fontSize: 15,
+  },
+  amountCancelText: {
+    color: '#666',
+    fontSize: 15,
+  },
+  amountSaveText: {
+    color: '#1a5fb4',
+    fontWeight: 'bold',
+    fontSize: 15,
   },
   checkedText: {
     textDecorationLine: 'line-through',

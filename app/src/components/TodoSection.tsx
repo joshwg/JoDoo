@@ -7,7 +7,6 @@ import {
   KeyboardAvoidingView,
   Modal,
   PanResponder,
-  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -21,6 +20,7 @@ import { createShare, fetchShare, shareExists } from '../syncClient';
 import { pushTodoListIfShared, refreshSyncConnections } from '../syncManager';
 import { Task, TodoList } from '../types';
 import EnterKeyModal from './EnterKeyModal';
+import FontSettingsModal from './FontSettingsModal';
 import ListTab from './ListTab';
 import ServerSettingsModal from './ServerSettingsModal';
 import ShareKeyModal from './ShareKeyModal';
@@ -37,7 +37,9 @@ export default function TodoSection() {
   const [renameText, setRenameText] = useState('');
   const [addMenuVisible, setAddMenuVisible] = useState(false);
   const [joinVisible, setJoinVisible] = useState(false);
+  const [settingsMenuOpen, setSettingsMenuOpen] = useState(false);
   const [serverSettingsVisible, setServerSettingsVisible] = useState(false);
+  const [fontSettingsVisible, setFontSettingsVisible] = useState(false);
   const [shareBusy, setShareBusy] = useState(false);
   const [shareKeyShown, setShareKeyShown] = useState<string | null>(null);
   const [draggingTaskId, setDraggingTaskId] = useState<number | null>(null);
@@ -236,24 +238,26 @@ export default function TodoSection() {
     (task: Task) => {
       stopAutoScroll();
       dragPageRef.current = null;
+      const overListId = dragOverListIdRef.current;
+      const overIndex = dragOverIndexRef.current;
       setDraggingTaskId(null);
       setDragOverListId(null);
       setDragOverIndex(null);
 
-      if (dragOverListId != null && dragOverListId !== task.listId) {
-        db.moveTaskToList(task.id, dragOverListId);
+      if (overListId != null && overListId !== task.listId) {
+        db.moveTaskToList(task.id, overListId);
         refreshTasks(activeListIdRef.current);
         pushTodoListIfShared(task.listId);
-        pushTodoListIfShared(dragOverListId);
+        pushTodoListIfShared(overListId);
         return;
       }
 
-      if (dragOverIndex != null && activeListIdRef.current != null) {
+      if (overIndex != null && activeListIdRef.current != null) {
         const current = tasksRef.current;
         const originalIndex = current.findIndex((t) => t.id === task.id);
         const withoutDragged = current.filter((t) => t.id !== task.id);
-        let insertAt = dragOverIndex;
-        if (originalIndex !== -1 && originalIndex < dragOverIndex) insertAt -= 1;
+        let insertAt = overIndex;
+        if (originalIndex !== -1 && originalIndex < overIndex) insertAt -= 1;
         insertAt = Math.max(0, Math.min(insertAt, withoutDragged.length));
         withoutDragged.splice(insertAt, 0, task);
         const orderedIds = withoutDragged.map((t) => t.id);
@@ -262,7 +266,7 @@ export default function TodoSection() {
         pushTodoListIfShared(activeListIdRef.current);
       }
     },
-    [dragOverListId, dragOverIndex, refreshTasks, stopAutoScroll]
+    [refreshTasks, stopAutoScroll]
   );
 
   // ----- drag-and-drop: reorder the lists (tabs) themselves -----
@@ -294,7 +298,7 @@ export default function TodoSection() {
       stopAutoScroll();
       dragPageRef.current = null;
       setDraggingListId(null);
-      const overId = dragOverListId;
+      const overId = dragOverListIdRef.current;
       setDragOverListId(null);
 
       if (overId != null && overId !== list.id) {
@@ -316,7 +320,7 @@ export default function TodoSection() {
         refreshLists(list.id);
       }
     },
-    [dragOverListId, refreshLists, stopAutoScroll]
+    [refreshLists, stopAutoScroll]
   );
 
   // ----- swipe-to-switch-list -----
@@ -330,6 +334,17 @@ export default function TodoSection() {
   useEffect(() => {
     activeListIdRef.current = activeListId;
   }, [activeListId]);
+  // Drag-over targets must also be refs: the useCallback closures for
+  // handleDragEnd / handleListDragEnd would otherwise capture stale state
+  // because React may not have flushed the latest set* from handleDragMove.
+  const dragOverListIdRef = useRef(dragOverListId);
+  useEffect(() => {
+    dragOverListIdRef.current = dragOverListId;
+  }, [dragOverListId]);
+  const dragOverIndexRef = useRef(dragOverIndex);
+  useEffect(() => {
+    dragOverIndexRef.current = dragOverIndex;
+  }, [dragOverIndex]);
 
   const switchListByOffset = useCallback((offset: number) => {
     const currentLists = listsRef.current;
@@ -622,9 +637,9 @@ export default function TodoSection() {
             {activeList?.name ?? ''}
           </Text>
           <Pressable
-            onPress={() => setServerSettingsVisible(true)}
+            onPress={() => setSettingsMenuOpen(true)}
             hitSlop={8}
-            accessibilityLabel="Server settings"
+            accessibilityLabel="Settings"
             style={styles.settingsButton}
           >
             <Text style={styles.settingsIcon}>⚙</Text>
@@ -706,7 +721,7 @@ export default function TodoSection() {
         onRequestClose={() => setRenamingList(null)}
       >
         <View style={styles.backdrop}>
-          <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+          <KeyboardAvoidingView behavior="padding">
             <View style={styles.renameSheet}>
               <Text style={styles.renameHeading}>Rename list</Text>
               <TextInput
@@ -799,6 +814,43 @@ export default function TodoSection() {
         visible={serverSettingsVisible}
         onClose={() => setServerSettingsVisible(false)}
       />
+
+      <FontSettingsModal
+        visible={fontSettingsVisible}
+        onClose={() => setFontSettingsVisible(false)}
+      />
+
+      {/* Settings dropdown anchored under the gear. */}
+      <Modal
+        visible={settingsMenuOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setSettingsMenuOpen(false)}
+      >
+        <Pressable style={styles.settingsMenuBackdrop} onPress={() => setSettingsMenuOpen(false)}>
+          <View style={styles.settingsMenu}>
+            <Pressable
+              style={styles.settingsMenuItem}
+              onPress={() => {
+                setSettingsMenuOpen(false);
+                setServerSettingsVisible(true);
+              }}
+            >
+              <Text style={styles.settingsMenuText}>Server Settings</Text>
+            </Pressable>
+            <View style={styles.settingsMenuDivider} />
+            <Pressable
+              style={styles.settingsMenuItem}
+              onPress={() => {
+                setSettingsMenuOpen(false);
+                setFontSettingsVisible(true);
+              }}
+            >
+              <Text style={styles.settingsMenuText}>Font Settings</Text>
+            </Pressable>
+          </View>
+        </Pressable>
+      </Modal>
     </View>
   );
 }
@@ -879,6 +931,36 @@ const styles = StyleSheet.create({
   settingsIcon: {
     fontSize: 20,
     color: '#555',
+  },
+  settingsMenuBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.15)',
+  },
+  settingsMenu: {
+    position: 'absolute',
+    top: 90,
+    left: 14,
+    backgroundColor: '#fff',
+    borderRadius: 8,
+    elevation: 6,
+    shadowColor: '#000',
+    shadowOpacity: 0.25,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 3 },
+    minWidth: 150,
+    paddingVertical: 4,
+  },
+  settingsMenuItem: {
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+  },
+  settingsMenuText: {
+    fontSize: 15,
+    color: '#222',
+  },
+  settingsMenuDivider: {
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: '#ddd',
   },
   addTaskButton: {
     width: 34,

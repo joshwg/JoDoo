@@ -18,7 +18,7 @@ import (
 )
 
 // Version is the server's release version, bumped alongside the client.
-const Version = "1.2.0"
+const Version = "1.2.1"
 
 // shareRetention is how long a share survives without receiving an update
 // before the periodic sweep deletes it. Any edit resets the clock.

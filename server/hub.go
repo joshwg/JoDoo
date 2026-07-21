@@ -91,11 +91,14 @@ func (h *Hub) leave(key string, c *wsClient) {
 func (h *Hub) broadcast(key string, msg wsMessage) {
 	h.mu.Lock()
 	r, ok := h.rooms[key]
-	h.mu.Unlock()
 	if !ok {
+		h.mu.Unlock()
 		return
 	}
+	// Acquire the room lock before releasing the hub lock so that leave
+	// cannot delete this room out of the map while we iterate its clients.
 	r.mu.Lock()
+	h.mu.Unlock()
 	defer r.mu.Unlock()
 	for c := range r.clients {
 		// Slow consumer: drop the message rather than block every other

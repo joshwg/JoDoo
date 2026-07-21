@@ -34,4 +34,7 @@ export interface ShoppingItem {
   name: string;
   checked: boolean;
   position: number;
+  /** Optional free-form quantity, e.g. "12" or "1.2 pounds", shown as
+   *  "Apples (12)"; null shows no amount. */
+  amount: string | null;
 }

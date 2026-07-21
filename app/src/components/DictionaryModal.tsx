@@ -4,7 +4,6 @@ import {
   FlatList,
   KeyboardAvoidingView,
   Modal,
-  Platform,
   Pressable,
   StyleSheet,
   Text,
@@ -155,7 +154,7 @@ export default function DictionaryModal({ visible, onClose }: Props) {
         >
           <KeyboardAvoidingView
             style={styles.backdrop}
-            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+            behavior="padding"
           >
             <View style={styles.editSheet}>
               <Text style={styles.editHeading}>Edit entry</Text>

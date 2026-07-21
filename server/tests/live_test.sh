@@ -83,7 +83,7 @@ check "GET /api/lists/{unknown}" "404" "$code"
 # 6. WebSocket round trip: confirm the initial snapshot push actually
 # arrives over the real TLS + reverse-proxy path.
 WS_URL="$(printf '%s' "$BASE_URL" | sed -e 's#^https:#wss:#' -e 's#^http:#ws:#')"
-if python3 ws_check.py "$WS_URL/ws/$SHARE_KEY?serverKey=$JODOO_SERVER_KEY"; then
+if python3 ../ws_check.py "$WS_URL/ws/$SHARE_KEY?serverKey=$JODOO_SERVER_KEY"; then
   check "WebSocket /ws/{key} snapshot" "ok" "ok"
 else
   check "WebSocket /ws/{key} snapshot" "ok" "fail"

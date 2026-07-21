@@ -22,7 +22,7 @@ const (
 	writeWait      = 10 * time.Second
 	pongWait       = 60 * time.Second
 	pingPeriod     = pongWait / 2
-	maxMessageSize = 1 << 20 // 1 MiB of list content is plenty
+	maxMessageSize = 256 << 10 // 256 KiB — comfortably covers ~100-item lists
 )
 
 // handleWS: GET /ws/{key}

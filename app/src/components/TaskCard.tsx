@@ -2,6 +2,7 @@ import React, { useRef, useState } from 'react';
 import { Animated, PanResponder, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 import { postItColor } from '../colors';
 import { formatIso, isOverdue } from '../dates';
+import { useTextSettings } from '../textSettings';
 import { Task } from '../types';
 
 const DOUBLE_TAP_MS = 300;
@@ -41,6 +42,7 @@ export default function TaskCard({
   dragging,
 }: Props) {
   const [expanded, setExpanded] = useState(false);
+  const { fontFamily, fontSize } = useTextSettings();
   const lastTapRef = useRef(0);
   const pan = useRef(new Animated.ValueXY({ x: 0, y: 0 })).current;
 
@@ -112,7 +114,10 @@ export default function TaskCard({
           <Text style={styles.checkboxMark}>{task.done ? '✓' : ''}</Text>
         </Pressable>
         <Pressable onPress={handleTap} style={styles.titleTapArea}>
-          <Text style={[styles.title, task.done && styles.doneText]} numberOfLines={expanded ? undefined : 1}>
+          <Text
+            style={[styles.title, task.done && styles.doneText, { fontFamily, fontSize }]}
+            numberOfLines={expanded ? undefined : 1}
+          >
             {task.title}
           </Text>
         </Pressable>
@@ -135,7 +140,11 @@ export default function TaskCard({
       <Pressable onPress={handleTap}>
         {task.description.length > 0 && (
           <Text
-            style={[styles.description, task.done && styles.doneText]}
+            style={[
+              styles.description,
+              task.done && styles.doneText,
+              { fontFamily, fontSize: Math.max(fontSize - 2, 10) },
+            ]}
             numberOfLines={expanded ? undefined : 1}
           >
             {task.description}
@@ -143,7 +152,13 @@ export default function TaskCard({
         )}
 
         {task.dueDate && (
-          <Text style={[styles.due, !task.done && isOverdue(task.dueDate) && styles.overdue]}>
+          <Text
+            style={[
+              styles.due,
+              !task.done && isOverdue(task.dueDate) && styles.overdue,
+              { fontFamily, fontSize: Math.max(fontSize - 4, 10) },
+            ]}
+          >
             Due {formatIso(task.dueDate)}
           </Text>
         )}

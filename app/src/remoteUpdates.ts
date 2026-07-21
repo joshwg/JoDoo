@@ -17,5 +17,11 @@ export function subscribeRemoteUpdate(fn: Listener): () => void {
 }
 
 export function emitRemoteUpdate(target: RemoteUpdateTarget): void {
-  listeners.forEach((fn) => fn(target));
+  listeners.forEach((fn) => {
+    try {
+      fn(target);
+    } catch (err) {
+      console.warn('remoteUpdate listener threw:', err);
+    }
+  });
 }

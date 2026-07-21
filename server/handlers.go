@@ -34,6 +34,7 @@ type createShareRequest struct {
 // The owner of a list calls this to generate a new random share key, seeding
 // the server's copy with the list's current contents.
 func (s *Server) handleCreateShare(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxMessageSize)
 	var req createShareRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
