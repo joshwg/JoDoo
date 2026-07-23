@@ -18,6 +18,7 @@ import * as db from '../db';
 import { subscribeRemoteUpdate } from '../remoteUpdates';
 import { createShare, fetchShare, shareExists } from '../syncClient';
 import { pushTodoListIfShared, refreshSyncConnections } from '../syncManager';
+import { headerFontSize, useTextSettings } from '../textSettings';
 import { Task, TodoList } from '../types';
 import EnterKeyModal from './EnterKeyModal';
 import FontSettingsModal from './FontSettingsModal';
@@ -42,6 +43,7 @@ export default function TodoSection() {
   const [fontSettingsVisible, setFontSettingsVisible] = useState(false);
   const [shareBusy, setShareBusy] = useState(false);
   const [shareKeyShown, setShareKeyShown] = useState<string | null>(null);
+  const { fontSize } = useTextSettings();
   const [draggingTaskId, setDraggingTaskId] = useState<number | null>(null);
   const [dragOverListId, setDragOverListId] = useState<number | null>(null);
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
@@ -93,6 +95,11 @@ export default function TodoSection() {
   type Rect = { x: number; y: number; width: number; height: number };
   const tabRefs = useRef(new Map<number, View>()).current;
   const tabRectsRef = useRef(new Map<number, Rect>()).current;
+  // Content-relative (not page-relative) tab positions, used to scroll the
+  // active tab into view - distinct from tabRectsRef, which tracks page
+  // coordinates for drag-and-drop hit-testing.
+  const tabLayoutsRef = useRef(new Map<number, { x: number; width: number }>()).current;
+  const tabStripViewportWidthRef = useRef(0);
   const taskRefs = useRef(new Map<number, View>()).current;
   const taskRectsRef = useRef(new Map<number, Rect>()).current;
   // Band (page-Y range) covered by the tab strip, used to gate auto-scroll so
@@ -139,6 +146,35 @@ export default function TodoSection() {
       taskListRectRef.current = { x, y, width, height };
     });
   }, [measureTabs, taskRefs, taskRectsRef]);
+
+  const SCROLL_INTO_VIEW_PADDING = 16;
+
+  /** Scrolls the tab strip just enough to bring `listId`'s tab fully into
+   *  view, if it isn't already - e.g. after selecting, creating, or joining
+   *  a list whose tab is currently scrolled off-screen. */
+  const scrollTabIntoView = useCallback(
+    (listId: number) => {
+      const layout = tabLayoutsRef.get(listId);
+      const viewportWidth = tabStripViewportWidthRef.current;
+      if (!layout || !viewportWidth) return;
+      const scrollX = tabScrollXRef.current;
+      const { x, width } = layout;
+      if (x < scrollX + SCROLL_INTO_VIEW_PADDING) {
+        const newX = Math.max(0, x - SCROLL_INTO_VIEW_PADDING);
+        tabScrollXRef.current = newX;
+        tabScrollViewRef.current?.scrollTo({ x: newX, animated: true });
+      } else if (x + width > scrollX + viewportWidth - SCROLL_INTO_VIEW_PADDING) {
+        const newX = Math.max(0, x + width - viewportWidth + SCROLL_INTO_VIEW_PADDING);
+        tabScrollXRef.current = newX;
+        tabScrollViewRef.current?.scrollTo({ x: newX, animated: true });
+      }
+    },
+    [tabLayoutsRef]
+  );
+
+  useEffect(() => {
+    if (activeListId != null) scrollTabIntoView(activeListId);
+  }, [activeListId, scrollTabIntoView]);
 
   const stopAutoScroll = useCallback(() => {
     if (autoScrollTimerRef.current != null) {
@@ -594,6 +630,9 @@ export default function TodoSection() {
         horizontal
         showsHorizontalScrollIndicator={false}
         ref={tabScrollViewRef}
+        onLayout={(e) => {
+          tabStripViewportWidthRef.current = e.nativeEvent.layout.width;
+        }}
         onScroll={(e) => {
           tabScrollXRef.current = e.nativeEvent.contentOffset.x;
         }}
@@ -623,6 +662,15 @@ export default function TodoSection() {
             onDragStart={handleListDragStart}
             onDragMove={handleListDragMove}
             onDragEnd={handleListDragEnd}
+            onLayout={(e) => {
+              tabLayoutsRef.set(list.id, {
+                x: e.nativeEvent.layout.x,
+                width: e.nativeEvent.layout.width,
+              });
+              // The just-created/just-selected tab may not have had a
+              // recorded layout yet when the activeListId effect ran.
+              if (list.id === activeListId) scrollTabIntoView(list.id);
+            }}
           />
         ))}
         <Pressable onPress={openAddMenu} style={styles.tab} accessibilityLabel="Add list">
@@ -633,7 +681,10 @@ export default function TodoSection() {
       {/* Header + task list: a one-finger horizontal slide here switches lists. */}
       <View style={styles.swipeArea} {...panResponder.panHandlers}>
         <View style={styles.listHeader}>
-          <Text style={styles.listTitle} numberOfLines={1}>
+          <Text
+            style={[styles.listTitle, { fontSize: headerFontSize(fontSize) }]}
+            numberOfLines={1}
+          >
             {activeList?.name ?? ''}
           </Text>
           <Pressable

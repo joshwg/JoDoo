@@ -4,7 +4,7 @@
   "main": "index.ts",
   "dependencies": {
     "@react-native-community/datetimepicker": "8.4.4",
-    "expo": "^54.0.36",
+    "expo": "^57.0.0",
     "expo-constants": "~18.0.13",
     "expo-secure-store": "~15.0.8",
     "expo-sqlite": "~16.0.10",

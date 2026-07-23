@@ -1,6 +1,7 @@
 import React, { forwardRef, useRef } from 'react';
 import {
   Animated,
+  LayoutChangeEvent,
   PanResponder,
   Pressable,
   StyleProp,
@@ -24,6 +25,9 @@ interface Props {
   onDragStart: (list: TodoList) => void;
   onDragMove: (list: TodoList, pageX: number, pageY: number) => void;
   onDragEnd: (list: TodoList, pageX: number, pageY: number) => void;
+  /** Reports this tab's position within the tab strip, so the strip can
+   *  scroll the active tab into view when it's off-screen. */
+  onLayout?: (e: LayoutChangeEvent) => void;
 }
 
 /**
@@ -31,7 +35,19 @@ interface Props {
  * small handle (⋮) initiates a horizontal drag to reorder the tabs.
  */
 const ListTab = forwardRef<View, Props>(function ListTab(
-  { list, style, textStyle, dragHitSlop, dragging, onSelect, onRename, onDragStart, onDragMove, onDragEnd },
+  {
+    list,
+    style,
+    textStyle,
+    dragHitSlop,
+    dragging,
+    onSelect,
+    onRename,
+    onDragStart,
+    onDragMove,
+    onDragEnd,
+    onLayout,
+  },
   ref
 ) {
   const pan = useRef(new Animated.ValueXY({ x: 0, y: 0 })).current;
@@ -77,6 +93,7 @@ const ListTab = forwardRef<View, Props>(function ListTab(
   return (
     <Animated.View
       ref={ref}
+      onLayout={onLayout}
       style={[style, styles.container, dragging && styles.dragging, { transform: pan.getTranslateTransform() }]}
     >
       <View {...panResponder.panHandlers} style={styles.handle} hitSlop={12} accessibilityLabel="Drag to reorder list">

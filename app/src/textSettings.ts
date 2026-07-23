@@ -21,7 +21,27 @@ const FONT_FAMILY_SETTING = 'text_font_family';
 const FONT_SIZE_SETTING = 'text_font_size';
 
 const DEFAULT_FONT_FAMILY: FontFamilyOption = 'System';
-const DEFAULT_FONT_SIZE = 16;
+export const DEFAULT_FONT_SIZE = 16;
+
+/** Size steps for the text hierarchy around the chosen base size: a section
+ *  header sits above it, description/due-date lines sit below - so the
+ *  reading order (header > title > description > due) holds at any size. */
+const HEADER_SIZE_STEP = 4;
+const DESCRIPTION_SIZE_STEP = 2;
+const DUE_SIZE_STEP = 4;
+const MIN_DERIVED_SIZE = 10;
+
+export function headerFontSize(fontSize: number): number {
+  return fontSize + HEADER_SIZE_STEP;
+}
+
+export function descriptionFontSize(fontSize: number): number {
+  return Math.max(fontSize - DESCRIPTION_SIZE_STEP, MIN_DERIVED_SIZE);
+}
+
+export function dueFontSize(fontSize: number): number {
+  return Math.max(fontSize - DUE_SIZE_STEP, MIN_DERIVED_SIZE);
+}
 
 function clampFontSize(size: number): number {
   return Math.min(MAX_FONT_SIZE, Math.max(MIN_FONT_SIZE, size));
@@ -58,8 +78,14 @@ export function fontFamilyStyle(family: FontFamilyOption): string | undefined {
 }
 
 /** Live-updating text settings for components that render task/shopping item
- *  text; re-renders whenever the settings change (e.g. from FontSettingsModal). */
-export function useTextSettings(): { fontFamily: string | undefined; fontSize: number } {
+ *  text; re-renders whenever the settings change (e.g. from FontSettingsModal).
+ *  `scale` is the ratio to the default size, for scaling non-text dimensions
+ *  (checkboxes, icons, padding) so item rows grow along with the text. */
+export function useTextSettings(): {
+  fontFamily: string | undefined;
+  fontSize: number;
+  scale: number;
+} {
   const [, setTick] = useState(0);
   useEffect(() => {
     const listener = () => setTick((t) => t + 1);
@@ -68,5 +94,6 @@ export function useTextSettings(): { fontFamily: string | undefined; fontSize: n
       listeners.delete(listener);
     };
   }, []);
-  return { fontFamily: fontFamilyStyle(getFontFamily()), fontSize: getFontSize() };
+  const fontSize = getFontSize();
+  return { fontFamily: fontFamilyStyle(getFontFamily()), fontSize, scale: fontSize / DEFAULT_FONT_SIZE };
 }

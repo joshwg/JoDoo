@@ -2,7 +2,7 @@ import React, { useRef, useState } from 'react';
 import { Animated, PanResponder, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 import { postItColor } from '../colors';
 import { formatIso, isOverdue } from '../dates';
-import { useTextSettings } from '../textSettings';
+import { descriptionFontSize, dueFontSize, useTextSettings } from '../textSettings';
 import { Task } from '../types';
 
 const DOUBLE_TAP_MS = 300;
@@ -42,7 +42,11 @@ export default function TaskCard({
   dragging,
 }: Props) {
   const [expanded, setExpanded] = useState(false);
-  const { fontFamily, fontSize } = useTextSettings();
+  const { fontFamily, fontSize, scale } = useTextSettings();
+  // Combines the iPad hit-target boost with the user's text-size setting, so
+  // the checkbox/icons/padding grow along with the text instead of the box
+  // staying fixed while the text inside it gets bigger.
+  const boxScale = CONTROL_SCALE * scale;
   const lastTapRef = useRef(0);
   const pan = useRef(new Animated.ValueXY({ x: 0, y: 0 })).current;
 
@@ -102,16 +106,22 @@ export default function TaskCard({
         { backgroundColor: postItColor(task.colorIndex) },
         dragging && styles.dragging,
         { transform: pan.getTranslateTransform() },
+        { padding: 12 * scale, marginHorizontal: 12 * scale, marginVertical: 6 * scale },
       ]}
     >
       <View style={styles.headerRow}>
         <Pressable
           onPress={() => onToggleDone(task)}
-          style={styles.checkbox}
+          style={[
+            styles.checkbox,
+            { width: 22 * boxScale, height: 22 * boxScale, borderRadius: 4 * boxScale },
+          ]}
           hitSlop={8}
           accessibilityLabel={task.done ? 'Mark not done' : 'Mark done'}
         >
-          <Text style={styles.checkboxMark}>{task.done ? '✓' : ''}</Text>
+          <Text style={[styles.checkboxMark, { fontSize: 14 * boxScale }]}>
+            {task.done ? '✓' : ''}
+          </Text>
         </Pressable>
         <Pressable onPress={handleTap} style={styles.titleTapArea}>
           <Text
@@ -121,19 +131,31 @@ export default function TaskCard({
             {task.title}
           </Text>
         </Pressable>
-        <Pressable onPress={() => onEdit(task)} hitSlop={8} style={styles.iconButton} accessibilityLabel="Edit task">
-          <Text style={styles.editIcon}>✎</Text>
+        <Pressable
+          onPress={() => onEdit(task)}
+          hitSlop={8}
+          style={[styles.iconButton, { paddingHorizontal: 2 * scale }]}
+          accessibilityLabel="Edit task"
+        >
+          <Text style={[styles.editIcon, { fontSize: 16 * boxScale }]}>✎</Text>
         </Pressable>
-        <Pressable onPress={() => onDelete(task)} hitSlop={8} style={styles.iconButton} accessibilityLabel="Delete task">
-          <Text style={styles.delete}>✕</Text>
+        <Pressable
+          onPress={() => onDelete(task)}
+          hitSlop={8}
+          style={[styles.iconButton, { paddingHorizontal: 2 * scale }]}
+          accessibilityLabel="Delete task"
+        >
+          <Text style={[styles.delete, { fontSize: 16 * boxScale, paddingHorizontal: 4 * scale }]}>
+            ✕
+          </Text>
         </Pressable>
         <View
           {...panResponder.panHandlers}
-          style={styles.dragHandle}
+          style={[styles.dragHandle, { paddingLeft: 6 * scale, paddingVertical: 2 * scale }]}
           hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
           accessibilityLabel="Drag to reorder or move task"
         >
-          <Text style={styles.dragHandleIcon}>☰</Text>
+          <Text style={[styles.dragHandleIcon, { fontSize: 16 * boxScale }]}>☰</Text>
         </View>
       </View>
 
@@ -143,7 +165,12 @@ export default function TaskCard({
             style={[
               styles.description,
               task.done && styles.doneText,
-              { fontFamily, fontSize: Math.max(fontSize - 2, 10) },
+              {
+                fontFamily,
+                fontSize: descriptionFontSize(fontSize),
+                marginTop: 6 * scale,
+                marginLeft: 30 * scale,
+              },
             ]}
             numberOfLines={expanded ? undefined : 1}
           >
@@ -156,7 +183,12 @@ export default function TaskCard({
             style={[
               styles.due,
               !task.done && isOverdue(task.dueDate) && styles.overdue,
-              { fontFamily, fontSize: Math.max(fontSize - 4, 10) },
+              {
+                fontFamily,
+                fontSize: dueFontSize(fontSize),
+                marginTop: 6 * scale,
+                marginLeft: 30 * scale,
+              },
             ]}
           >
             Due {formatIso(task.dueDate)}
@@ -193,9 +225,6 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   checkbox: {
-    width: 22 * CONTROL_SCALE,
-    height: 22 * CONTROL_SCALE,
-    borderRadius: 4 * CONTROL_SCALE,
     borderWidth: 1.5,
     borderColor: 'rgba(0,0,0,0.45)',
     alignItems: 'center',
@@ -203,7 +232,6 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255,255,255,0.5)',
   },
   checkboxMark: {
-    fontSize: 14 * CONTROL_SCALE,
     fontWeight: 'bold',
     color: '#333',
   },
@@ -215,24 +243,15 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     color: '#222',
   },
-  iconButton: {
-    paddingHorizontal: 2,
-  },
+  iconButton: {},
   editIcon: {
-    fontSize: 16 * CONTROL_SCALE,
     color: 'rgba(0,0,0,0.45)',
   },
   delete: {
-    fontSize: 16 * CONTROL_SCALE,
     color: 'rgba(0,0,0,0.4)',
-    paddingHorizontal: 4,
   },
-  dragHandle: {
-    paddingLeft: 6,
-    paddingVertical: 2,
-  },
+  dragHandle: {},
   dragHandleIcon: {
-    fontSize: 16 * CONTROL_SCALE,
     color: 'rgba(0,0,0,0.35)',
   },
   description: {

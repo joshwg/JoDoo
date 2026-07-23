@@ -20,7 +20,7 @@ import {
   refreshSyncConnections,
   SHOPPING_SHARE_KEY_SETTING,
 } from '../syncManager';
-import { useTextSettings } from '../textSettings';
+import { headerFontSize, useTextSettings } from '../textSettings';
 import { DictionaryEntry, ShoppingItem } from '../types';
 import DictionaryModal from './DictionaryModal';
 import EnterKeyModal from './EnterKeyModal';
@@ -42,7 +42,7 @@ export default function ShoppingSection() {
   const [shareBusy, setShareBusy] = useState(false);
   const [editingAmountItem, setEditingAmountItem] = useState<ShoppingItem | null>(null);
   const [amountText, setAmountText] = useState('');
-  const { fontFamily, fontSize } = useTextSettings();
+  const { fontFamily, fontSize, scale } = useTextSettings();
 
   const refresh = useCallback(() => setItems(db.getShoppingItems()), []);
 
@@ -237,7 +237,7 @@ export default function ShoppingSection() {
     <View style={styles.container}>
       {/* Line 1: title with settings on the far right. */}
       <View style={styles.headerRow}>
-        <Text style={styles.heading}>Shopping</Text>
+        <Text style={[styles.heading, { fontSize: headerFontSize(fontSize) }]}>Shopping</Text>
         <Pressable
           onPress={() => setMenuOpen(true)}
           hitSlop={8}
@@ -286,7 +286,7 @@ export default function ShoppingSection() {
         data={items}
         keyExtractor={(i) => String(i.id)}
         renderItem={({ item }) => (
-          <View style={styles.itemRow}>
+          <View style={[styles.itemRow, { paddingHorizontal: 16 * scale, paddingVertical: 10 * scale }]}>
             <Pressable
               style={styles.itemMain}
               onPress={() => {
@@ -295,8 +295,16 @@ export default function ShoppingSection() {
                 pushShoppingIfShared();
               }}
             >
-              <View style={[styles.checkbox, item.checked && styles.checkboxChecked]}>
-                {item.checked && <Text style={styles.checkMark}>✓</Text>}
+              <View
+                style={[
+                  styles.checkbox,
+                  item.checked && styles.checkboxChecked,
+                  { width: 22 * scale, height: 22 * scale, borderRadius: 4 * scale },
+                ]}
+              >
+                {item.checked && (
+                  <Text style={[styles.checkMark, { fontSize: 14 * scale }]}>✓</Text>
+                )}
               </View>
               <Text
                 style={[
@@ -319,7 +327,7 @@ export default function ShoppingSection() {
                   hitSlop={8}
                   accessibilityLabel="Set amount"
                 >
-                  <Text style={styles.amountBtn}>+</Text>
+                  <Text style={[styles.amountBtn, { fontSize: 18 * scale }]}>+</Text>
                 </Pressable>
               )}
               {item.amount != null && isPlainCount(item.amount) && (
@@ -329,14 +337,14 @@ export default function ShoppingSection() {
                     hitSlop={8}
                     accessibilityLabel="Decrease amount"
                   >
-                    <Text style={styles.amountBtn}>−</Text>
+                    <Text style={[styles.amountBtn, { fontSize: 18 * scale }]}>−</Text>
                   </Pressable>
                   <Pressable
                     onPress={() => bumpAmount(item, 1)}
                     hitSlop={8}
                     accessibilityLabel="Increase amount"
                   >
-                    <Text style={styles.amountBtn}>+</Text>
+                    <Text style={[styles.amountBtn, { fontSize: 18 * scale }]}>+</Text>
                   </Pressable>
                 </>
               )}
@@ -350,7 +358,9 @@ export default function ShoppingSection() {
               hitSlop={8}
               accessibilityLabel="Delete item"
             >
-              <Text style={styles.delete}>✕</Text>
+              <Text style={[styles.delete, { fontSize: 16 * scale, paddingHorizontal: 4 * scale }]}>
+                ✕
+              </Text>
             </Pressable>
           </View>
         )}
