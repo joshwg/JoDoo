@@ -64,27 +64,20 @@ export default function ShoppingSection() {
     setSuggestions(text.trim() ? db.suggestItems(text, 3) : []);
   };
 
-  const addItem = (name: string) => {
-    const trimmed = name.trim();
+  const addItem = (raw: string) => {
+    const trimmed = raw.trim();
     if (!trimmed) return;
+    // Shorthand "item, amount" - split off the amount before it ever
+    // touches the dictionary, which only ever learns bare item names.
+    const commaIndex = trimmed.indexOf(',');
+    const name = (commaIndex === -1 ? trimmed : trimmed.slice(0, commaIndex)).trim();
+    const amount = commaIndex === -1 ? null : trimmed.slice(commaIndex + 1).trim() || null;
+    if (!name) return;
     // Learns new items and bumps usage/casing for known ones.
-    db.recordItemUse(trimmed);
-    db.addShoppingItem(trimmed);
+    db.recordItemUse(name);
+    db.addShoppingItem(name, amount);
     setNewItem('');
     setSuggestions([]);
-    refresh();
-    pushShoppingIfShared();
-  };
-
-  const isPlainCount = (amount: string) => /^\d+$/.test(amount);
-
-  /** Steps a plain integer amount by `delta`; clears it once it would hit
-   *  zero. Only meaningful for plain counts - free-form amounts like "1.2
-   *  pounds" are only ever set via the edit dialog. */
-  const bumpAmount = (item: ShoppingItem, delta: number) => {
-    const current = item.amount && isPlainCount(item.amount) ? parseInt(item.amount, 10) : 0;
-    const next = current + delta;
-    db.setShoppingAmount(item.id, next > 0 ? String(next) : null);
     refresh();
     pushShoppingIfShared();
   };
@@ -244,7 +237,7 @@ export default function ShoppingSection() {
           accessibilityLabel="Settings"
           style={styles.settingsButton}
         >
-          <Text style={styles.settingsIcon}>⚙</Text>
+          <Text style={[styles.settingsIcon, { fontSize: 22 * scale }]}>⚙</Text>
         </Pressable>
       </View>
 
@@ -262,10 +255,13 @@ export default function ShoppingSection() {
         />
         <Pressable
           onPress={() => addItem(newItem)}
-          style={styles.addButton}
+          style={[
+            styles.addButton,
+            { width: 38 * scale, height: 38 * scale, borderRadius: 19 * scale },
+          ]}
           accessibilityLabel="Add item"
         >
-          <Text style={styles.addPlus}>+</Text>
+          <Text style={[styles.addPlus, { fontSize: 24 * scale, lineHeight: 28 * scale }]}>+</Text>
         </Pressable>
       </View>
 
@@ -320,47 +316,25 @@ export default function ShoppingSection() {
                 )}
               </Text>
             </Pressable>
-            <View style={styles.amountControls}>
-              {item.amount == null && (
-                <Pressable
-                  onPress={() => bumpAmount(item, 1)}
-                  hitSlop={8}
-                  accessibilityLabel="Set amount"
-                >
-                  <Text style={[styles.amountBtn, { fontSize: 18 * scale }]}>+</Text>
-                </Pressable>
-              )}
-              {item.amount != null && isPlainCount(item.amount) && (
-                <>
-                  <Pressable
-                    onPress={() => bumpAmount(item, -1)}
-                    hitSlop={8}
-                    accessibilityLabel="Decrease amount"
-                  >
-                    <Text style={[styles.amountBtn, { fontSize: 18 * scale }]}>−</Text>
-                  </Pressable>
-                  <Pressable
-                    onPress={() => bumpAmount(item, 1)}
-                    hitSlop={8}
-                    accessibilityLabel="Increase amount"
-                  >
-                    <Text style={[styles.amountBtn, { fontSize: 18 * scale }]}>+</Text>
-                  </Pressable>
-                </>
-              )}
-            </View>
+            <Pressable
+              onPress={() => openAmountEditor(item)}
+              hitSlop={10}
+              style={styles.amountControls}
+              accessibilityLabel={item.amount == null ? 'Set amount' : 'Edit amount'}
+            >
+              <Text style={[styles.amountBtn, { fontSize: 18 * scale }]}>+</Text>
+            </Pressable>
             <Pressable
               onPress={() => {
                 db.deleteShoppingItem(item.id);
                 refresh();
                 pushShoppingIfShared();
               }}
-              hitSlop={8}
+              hitSlop={10}
+              style={styles.deleteTouch}
               accessibilityLabel="Delete item"
             >
-              <Text style={[styles.delete, { fontSize: 16 * scale, paddingHorizontal: 4 * scale }]}>
-                ✕
-              </Text>
+              <Text style={[styles.delete, { fontSize: 16 * scale }]}>✕</Text>
             </Pressable>
           </View>
         )}
@@ -638,6 +612,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     paddingHorizontal: 16,
     paddingVertical: 10,
+    gap: 24,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: '#ddd',
   },
@@ -672,16 +647,14 @@ const styles = StyleSheet.create({
     color: '#222',
   },
   amountControls: {
-    flexDirection: 'row',
     alignItems: 'center',
-    gap: 14,
-    paddingHorizontal: 6,
+    justifyContent: 'center',
+    padding: 8,
   },
   amountBtn: {
     fontSize: 18,
     fontWeight: 'bold',
     color: '#1a5fb4',
-    paddingHorizontal: 2,
   },
   amountBackdrop: {
     flex: 1,
@@ -738,10 +711,14 @@ const styles = StyleSheet.create({
     textDecorationLine: 'line-through',
     color: '#999',
   },
+  deleteTouch: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 8,
+  },
   delete: {
     fontSize: 16,
     color: '#bbb',
-    paddingHorizontal: 4,
   },
   empty: {
     textAlign: 'center',

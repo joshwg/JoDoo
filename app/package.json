@@ -1,21 +1,23 @@
 {
   "name": "jodoo",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "main": "index.ts",
   "dependencies": {
-    "@react-native-community/datetimepicker": "8.4.4",
-    "expo": "^57.0.0",
-    "expo-constants": "~18.0.13",
-    "expo-secure-store": "~15.0.8",
-    "expo-sqlite": "~16.0.10",
-    "expo-status-bar": "~3.0.9",
-    "react": "19.1.0",
-    "react-native": "0.81.5",
-    "react-native-safe-area-context": "~5.6.0"
+    "@react-native-community/datetimepicker": "9.1.0",
+    "expo": "^57.0.8",
+    "expo-constants": "~57.0.7",
+    "expo-secure-store": "~57.0.1",
+    "expo-splash-screen": "~57.0.5",
+    "expo-sqlite": "~57.0.1",
+    "expo-status-bar": "~57.0.1",
+    "react": "19.2.3",
+    "react-native": "0.86.0",
+    "react-native-safe-area-context": "~5.7.0"
   },
   "devDependencies": {
-    "@types/react": "~19.1.10",
-    "typescript": "~5.9.2"
+    "@expo/config-plugins": "^57.0.6",
+    "@types/react": "~19.2.4",
+    "typescript": "~6.0.3"
   },
   "scripts": {
     "start": "expo start",

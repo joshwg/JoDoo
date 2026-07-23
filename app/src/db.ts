@@ -692,13 +692,14 @@ export function getShoppingItems(): ShoppingItem[] {
 /** Shopping item names are kept short enough to read on one line. */
 export const MAX_SHOPPING_ITEM_NAME_LENGTH = 32;
 
-export function addShoppingItem(name: string): void {
+export function addShoppingItem(name: string, amount: string | null = null): void {
   const pos = db.getFirstSync<{ p: number }>(
     'SELECT COALESCE(MAX(position), 0) + 1 AS p FROM shopping_items'
   )!.p;
   db.runSync(
-    'INSERT INTO shopping_items (name, uuid, position, updated_at) VALUES (?, ?, ?, ?)',
+    'INSERT INTO shopping_items (name, amount, uuid, position, updated_at) VALUES (?, ?, ?, ?, ?)',
     name.trim().slice(0, MAX_SHOPPING_ITEM_NAME_LENGTH),
+    amount && amount.trim() ? amount.trim() : null,
     generateUuid(),
     pos,
     new Date().toISOString()

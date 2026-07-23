@@ -43,7 +43,7 @@ export default function TodoSection() {
   const [fontSettingsVisible, setFontSettingsVisible] = useState(false);
   const [shareBusy, setShareBusy] = useState(false);
   const [shareKeyShown, setShareKeyShown] = useState<string | null>(null);
-  const { fontSize } = useTextSettings();
+  const { fontSize, scale } = useTextSettings();
   const [draggingTaskId, setDraggingTaskId] = useState<number | null>(null);
   const [dragOverListId, setDragOverListId] = useState<number | null>(null);
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
@@ -674,7 +674,7 @@ export default function TodoSection() {
           />
         ))}
         <Pressable onPress={openAddMenu} style={styles.tab} accessibilityLabel="Add list">
-          <Text style={styles.plusTab}>+</Text>
+          <Text style={[styles.plusTab, { fontSize: 16 * scale }]}>+</Text>
         </Pressable>
       </ScrollView>
 
@@ -693,17 +693,22 @@ export default function TodoSection() {
             accessibilityLabel="Settings"
             style={styles.settingsButton}
           >
-            <Text style={styles.settingsIcon}>⚙</Text>
+            <Text style={[styles.settingsIcon, { fontSize: 20 * scale }]}>⚙</Text>
           </Pressable>
           <Pressable
             onPress={() => {
               setEditingTask(null);
               setEditorVisible(true);
             }}
-            style={styles.addTaskButton}
+            style={[
+              styles.addTaskButton,
+              { width: 34 * scale, height: 34 * scale, borderRadius: 17 * scale },
+            ]}
             accessibilityLabel="Add task"
           >
-            <Text style={styles.addTaskPlus}>+</Text>
+            <Text style={[styles.addTaskPlus, { fontSize: 22 * scale, lineHeight: 26 * scale }]}>
+              +
+            </Text>
           </Pressable>
         </View>
 

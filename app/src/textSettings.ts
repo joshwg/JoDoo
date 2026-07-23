@@ -2,6 +2,7 @@
 // the UI). Backed by the same settings key/value table as other device-local
 // prefs (e.g. server config); never synced between devices.
 import { useEffect, useState } from 'react';
+import { Platform } from 'react-native';
 import { getSetting, setSetting } from './db';
 
 /** 'System' means no fontFamily override (platform default). */
@@ -72,9 +73,20 @@ export function setFontSize(size: number): void {
   listeners.forEach((fn) => fn());
 }
 
+/** Android has no fonts installed under these desktop/iOS names - it only
+ *  ships the generic families below. Substituting them is the closest
+ *  Android can get without bundling actual font files. */
+const ANDROID_FONT_FAMILY: Record<Exclude<FontFamilyOption, 'System'>, string> = {
+  Arial: 'sans-serif',
+  Helvetica: 'sans-serif',
+  'Times New Roman': 'serif',
+  'Courier New': 'monospace',
+};
+
 /** RN's `fontFamily` style value: undefined lets the platform default apply. */
 export function fontFamilyStyle(family: FontFamilyOption): string | undefined {
-  return family === 'System' ? undefined : family;
+  if (family === 'System') return undefined;
+  return Platform.OS === 'android' ? ANDROID_FONT_FAMILY[family] : family;
 }
 
 /** Live-updating text settings for components that render task/shopping item
