@@ -43,7 +43,7 @@ export default function TodoSection() {
   const [fontSettingsVisible, setFontSettingsVisible] = useState(false);
   const [shareBusy, setShareBusy] = useState(false);
   const [shareKeyShown, setShareKeyShown] = useState<string | null>(null);
-  const { fontSize, scale } = useTextSettings();
+  const { fontFamily, fontSize, scale } = useTextSettings();
   const [draggingTaskId, setDraggingTaskId] = useState<number | null>(null);
   const [dragOverListId, setDragOverListId] = useState<number | null>(null);
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
@@ -656,7 +656,11 @@ export default function TodoSection() {
               draggingTaskId != null && list.id !== activeListId && styles.tabDropTarget,
               dragOverListId === list.id && styles.tabDragOver,
             ]}
-            textStyle={[styles.tabText, list.id === activeListId && styles.tabTextActive]}
+            textStyle={[
+              styles.tabText,
+              list.id === activeListId && styles.tabTextActive,
+              { fontFamily, fontSize: 14 * scale },
+            ]}
             onSelect={() => setActiveListId(list.id)}
             onRename={() => openRename(list)}
             onDragStart={handleListDragStart}
@@ -682,7 +686,7 @@ export default function TodoSection() {
       <View style={styles.swipeArea} {...panResponder.panHandlers}>
         <View style={styles.listHeader}>
           <Text
-            style={[styles.listTitle, { fontSize: headerFontSize(fontSize) }]}
+            style={[styles.listTitle, { fontFamily, fontSize: headerFontSize(fontSize) }]}
             numberOfLines={1}
           >
             {activeList?.name ?? ''}

@@ -11,6 +11,7 @@ import {
 } from 'react-native';
 import * as db from '../db';
 import { defaultDueDate, formatIso, fromIso, todayIso, toIso } from '../dates';
+import { headerFontSize, useTextSettings } from '../textSettings';
 import { Task } from '../types';
 
 interface Props {
@@ -26,6 +27,7 @@ export default function TaskEditorModal({ visible, task, onSave, onCancel }: Pro
   const [description, setDescription] = useState('');
   const [dueDate, setDueDate] = useState<string | null>(defaultDueDate());
   const [showPicker, setShowPicker] = useState(false);
+  const { fontFamily, fontSize } = useTextSettings();
 
   useEffect(() => {
     if (visible) {
@@ -46,10 +48,12 @@ export default function TaskEditorModal({ visible, task, onSave, onCancel }: Pro
         behavior="padding"
       >
         <View style={styles.sheet}>
-          <Text style={styles.heading}>{task ? 'Edit Task' : 'New Task'}</Text>
+          <Text style={[styles.heading, { fontFamily, fontSize: headerFontSize(fontSize) }]}>
+            {task ? 'Edit Task' : 'New Task'}
+          </Text>
 
           <TextInput
-            style={styles.input}
+            style={[styles.input, { fontFamily, fontSize }]}
             placeholder="Title"
             value={title}
             onChangeText={setTitle}
@@ -57,7 +61,7 @@ export default function TaskEditorModal({ visible, task, onSave, onCancel }: Pro
             maxLength={db.MAX_TASK_TITLE_LENGTH}
           />
           <TextInput
-            style={[styles.input, styles.multiline]}
+            style={[styles.input, styles.multiline, { fontFamily, fontSize }]}
             placeholder="Description (optional)"
             value={description}
             onChangeText={setDescription}
@@ -67,17 +71,17 @@ export default function TaskEditorModal({ visible, task, onSave, onCancel }: Pro
 
           <View style={styles.dateRow}>
             <Pressable onPress={() => setShowPicker(true)} style={styles.dateButton}>
-              <Text style={styles.dateText}>
+              <Text style={[styles.dateText, { fontFamily, fontSize }]}>
                 {dueDate ? `📅 ${formatIso(dueDate)}` : '📅 No due date'}
               </Text>
             </Pressable>
             {dueDate ? (
               <Pressable onPress={() => setDueDate(null)} hitSlop={8}>
-                <Text style={styles.clearDate}>Clear</Text>
+                <Text style={[styles.clearDate, { fontFamily, fontSize }]}>Clear</Text>
               </Pressable>
             ) : (
               <Pressable onPress={() => setDueDate(todayIso())} hitSlop={8}>
-                <Text style={styles.clearDate}>Set today</Text>
+                <Text style={[styles.clearDate, { fontFamily, fontSize }]}>Set today</Text>
               </Pressable>
             )}
           </View>
@@ -96,13 +100,13 @@ export default function TaskEditorModal({ visible, task, onSave, onCancel }: Pro
 
           <View style={styles.actions}>
             <Pressable onPress={onCancel} style={styles.actionButton}>
-              <Text style={styles.cancelText}>Cancel</Text>
+              <Text style={[styles.cancelText, { fontFamily, fontSize }]}>Cancel</Text>
             </Pressable>
             <Pressable
               onPress={() => canSave && onSave(title, description, dueDate)}
               style={[styles.actionButton, !canSave && styles.disabled]}
             >
-              <Text style={styles.saveText}>Save</Text>
+              <Text style={[styles.saveText, { fontFamily, fontSize }]}>Save</Text>
             </Pressable>
           </View>
         </View>

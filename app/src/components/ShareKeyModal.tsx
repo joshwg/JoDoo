@@ -1,4 +1,5 @@
-import React from 'react';
+import * as Clipboard from 'expo-clipboard';
+import React, { useEffect, useState } from 'react';
 import { Modal, Pressable, StyleSheet, Text, View } from 'react-native';
 
 interface Props {
@@ -7,9 +8,22 @@ interface Props {
   onClose: () => void;
 }
 
-/** Shows a share key as selectable text so the owner can copy it (long-press
- *  to select, then use the OS's copy action) and pass it along out-of-band. */
+/** Shows a share key as selectable text (long-press to select, then use the
+ *  OS's copy action) plus a one-tap copy button, so the owner can pass it
+ *  along out-of-band. */
 export default function ShareKeyModal({ visible, shareKey, onClose }: Props) {
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    if (visible) setCopied(false);
+  }, [visible]);
+
+  const copy = async () => {
+    if (!shareKey) return;
+    await Clipboard.setStringAsync(shareKey);
+    setCopied(true);
+  };
+
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
       <View style={styles.backdrop}>
@@ -22,6 +36,9 @@ export default function ShareKeyModal({ visible, shareKey, onClose }: Props) {
           <Text style={styles.key} selectable>
             {shareKey}
           </Text>
+          <Pressable onPress={copy} style={styles.copyButton}>
+            <Text style={styles.copyText}>{copied ? 'Copied!' : 'Copy to Clipboard'}</Text>
+          </Pressable>
           <Pressable onPress={onClose} style={styles.closeButton}>
             <Text style={styles.closeText}>Done</Text>
           </Pressable>
@@ -63,6 +80,17 @@ const styles = StyleSheet.create({
     marginTop: 16,
     marginBottom: 16,
     textAlign: 'center',
+  },
+  copyButton: {
+    backgroundColor: '#1a5fb4',
+    borderRadius: 8,
+    paddingVertical: 10,
+    paddingHorizontal: 20,
+  },
+  copyText: {
+    color: '#fff',
+    fontWeight: 'bold',
+    fontSize: 15,
   },
   closeButton: {
     paddingVertical: 10,

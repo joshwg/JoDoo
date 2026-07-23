@@ -11,6 +11,7 @@ import {
   View,
 } from 'react-native';
 import * as db from '../db';
+import { descriptionFontSize, headerFontSize, useTextSettings } from '../textSettings';
 import { DictionaryEntry } from '../types';
 
 interface Props {
@@ -27,6 +28,7 @@ export default function DictionaryModal({ visible, onClose }: Props) {
   const [entries, setEntries] = useState<DictionaryEntry[]>([]);
   const [editing, setEditing] = useState<DictionaryEntry | null>(null);
   const [editText, setEditText] = useState('');
+  const { fontFamily, fontSize, scale } = useTextSettings();
 
   const refresh = useCallback((f: string) => setEntries(db.getDictionary(f)), []);
 
@@ -92,27 +94,38 @@ export default function DictionaryModal({ visible, onClose }: Props) {
     <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
       <View style={styles.container}>
         <View style={styles.header}>
-          <Text style={styles.heading}>Dictionary</Text>
+          <Text style={[styles.heading, { fontFamily, fontSize: headerFontSize(fontSize) }]}>
+            Dictionary
+          </Text>
           <Pressable onPress={onClose} hitSlop={8}>
-            <Text style={styles.close}>Done</Text>
+            <Text style={[styles.close, { fontFamily, fontSize }]}>Done</Text>
           </Pressable>
         </View>
 
         <View style={styles.addRow}>
           <TextInput
-            style={styles.input}
+            style={[styles.input, { fontFamily, fontSize }]}
             placeholder="Search or add an item…"
             value={filter}
             onChangeText={changeFilter}
             onSubmitEditing={add}
             returnKeyType="done"
           />
-          <Pressable onPress={add} style={styles.addButton} accessibilityLabel="Add entry">
-            <Text style={styles.addPlus}>+</Text>
+          <Pressable
+            onPress={add}
+            style={[
+              styles.addButton,
+              { width: 38 * scale, height: 38 * scale, borderRadius: 19 * scale },
+            ]}
+            accessibilityLabel="Add entry"
+          >
+            <Text style={[styles.addPlus, { fontSize: 24 * scale, lineHeight: 28 * scale }]}>
+              +
+            </Text>
           </Pressable>
         </View>
 
-        <Text style={styles.count}>
+        <Text style={[styles.count, { fontFamily, fontSize: descriptionFontSize(fontSize) }]}>
           {entries.length} item{entries.length === 1 ? '' : 's'}
         </Text>
 
@@ -128,21 +141,29 @@ export default function DictionaryModal({ visible, onClose }: Props) {
                   setEditText(item.name);
                 }}
               >
-                <Text style={styles.rowText}>{item.name}</Text>
-                {item.uses > 0 && <Text style={styles.uses}>used {item.uses}×</Text>}
+                <Text style={[styles.rowText, { fontFamily, fontSize }]}>{item.name}</Text>
+                {item.uses > 0 && (
+                  <Text style={[styles.uses, { fontFamily, fontSize: descriptionFontSize(fontSize) }]}>
+                    used {item.uses}×
+                  </Text>
+                )}
               </Pressable>
               <Pressable onPress={() => remove(item)} hitSlop={8} accessibilityLabel="Delete entry">
-                <Text style={styles.delete}>✕</Text>
+                <Text style={[styles.delete, { fontSize: 15 * scale }]}>✕</Text>
               </Pressable>
             </View>
           )}
           ListEmptyComponent={
-            <Text style={styles.empty}>No matching items. Press + to add "{filter.trim()}".</Text>
+            <Text style={[styles.empty, { fontFamily, fontSize }]}>
+              No matching items. Press + to add "{filter.trim()}".
+            </Text>
           }
         />
 
         <Pressable onPress={resetAll} style={styles.resetButton}>
-          <Text style={styles.resetText}>Delete All & Restore Defaults</Text>
+          <Text style={[styles.resetText, { fontFamily, fontSize }]}>
+            Delete All & Restore Defaults
+          </Text>
         </Pressable>
 
         {/* Edit dialog */}
@@ -157,9 +178,11 @@ export default function DictionaryModal({ visible, onClose }: Props) {
             behavior="padding"
           >
             <View style={styles.editSheet}>
-              <Text style={styles.editHeading}>Edit entry</Text>
+              <Text style={[styles.editHeading, { fontFamily, fontSize: headerFontSize(fontSize) }]}>
+                Edit entry
+              </Text>
               <TextInput
-                style={styles.input}
+                style={[styles.input, { fontFamily, fontSize }]}
                 value={editText}
                 onChangeText={setEditText}
                 autoFocus
@@ -167,10 +190,10 @@ export default function DictionaryModal({ visible, onClose }: Props) {
               />
               <View style={styles.editActions}>
                 <Pressable onPress={() => setEditing(null)} style={styles.editButton}>
-                  <Text style={styles.cancelText}>Cancel</Text>
+                  <Text style={[styles.cancelText, { fontFamily, fontSize }]}>Cancel</Text>
                 </Pressable>
                 <Pressable onPress={commitEdit} style={styles.editButton}>
-                  <Text style={styles.saveText}>Save</Text>
+                  <Text style={[styles.saveText, { fontFamily, fontSize }]}>Save</Text>
                 </Pressable>
               </View>
             </View>

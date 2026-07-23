@@ -1,3 +1,4 @@
+import { Ionicons } from '@expo/vector-icons';
 import React, { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
@@ -13,6 +14,7 @@ import {
 import { clearServerConfig, getServerConfig, setServerConfig } from '../serverConfig';
 import { refreshSyncConnections } from '../syncManager';
 import { testServerConnection } from '../syncClient';
+import { useTextSettings } from '../textSettings';
 
 interface Props {
   visible: boolean;
@@ -23,6 +25,8 @@ export default function ServerSettingsModal({ visible, onClose }: Props) {
   const [baseUrl, setBaseUrl] = useState('');
   const [serverKey, setServerKey] = useState('');
   const [busy, setBusy] = useState(false);
+  const [keyVisible, setKeyVisible] = useState(false);
+  const { scale } = useTextSettings();
 
   useEffect(() => {
     if (!visible) return;
@@ -30,6 +34,7 @@ export default function ServerSettingsModal({ visible, onClose }: Props) {
       setBaseUrl(config?.baseUrl ?? '');
       setServerKey(config?.serverKey ?? '');
     });
+    setKeyVisible(false);
   }, [visible]);
 
   const test = async () => {
@@ -95,15 +100,29 @@ export default function ServerSettingsModal({ visible, onClose }: Props) {
             keyboardType="url"
           />
           <Text style={styles.label}>Server Key</Text>
-          <TextInput
-            style={styles.input}
-            value={serverKey}
-            onChangeText={setServerKey}
-            placeholder="20+ character server key"
-            autoCapitalize="none"
-            autoCorrect={false}
-            secureTextEntry
-          />
+          <View style={styles.keyRow}>
+            <TextInput
+              style={[styles.input, styles.keyInput]}
+              value={serverKey}
+              onChangeText={setServerKey}
+              placeholder="20+ character server key"
+              autoCapitalize="none"
+              autoCorrect={false}
+              secureTextEntry={!keyVisible}
+            />
+            <Pressable
+              onPress={() => setKeyVisible((v) => !v)}
+              style={styles.keyToggle}
+              hitSlop={8}
+              accessibilityLabel={keyVisible ? 'Hide server key' : 'Show server key'}
+            >
+              <Ionicons
+                name={keyVisible ? 'eye-off-outline' : 'eye-outline'}
+                size={20 * scale}
+                color="#1a5fb4"
+              />
+            </Pressable>
+          </View>
           {busy && <ActivityIndicator style={styles.spinner} />}
           <View style={styles.actions}>
             <Pressable onPress={remove} style={styles.button} disabled={busy}>
@@ -158,6 +177,18 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     fontSize: 15,
     color: '#222',
+  },
+  keyRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  keyInput: {
+    flex: 1,
+  },
+  keyToggle: {
+    paddingVertical: 8,
+    paddingHorizontal: 4,
   },
   spinner: {
     marginTop: 12,

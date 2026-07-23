@@ -230,7 +230,7 @@ export default function ShoppingSection() {
     <View style={styles.container}>
       {/* Line 1: title with settings on the far right. */}
       <View style={styles.headerRow}>
-        <Text style={[styles.heading, { fontSize: headerFontSize(fontSize) }]}>Shopping</Text>
+        <Text style={[styles.heading, { fontFamily, fontSize: headerFontSize(fontSize) }]}>Shopping</Text>
         <Pressable
           onPress={() => setMenuOpen(true)}
           hitSlop={8}
@@ -244,7 +244,7 @@ export default function ShoppingSection() {
       {/* Line 2: add item. */}
       <View style={styles.addRow}>
         <TextInput
-          style={styles.input}
+          style={[styles.input, { fontFamily, fontSize }]}
           placeholder="Add an item…"
           value={newItem}
           onChangeText={changeInput}
@@ -446,9 +446,11 @@ export default function ShoppingSection() {
       >
         <KeyboardAvoidingView style={styles.amountBackdrop} behavior="padding">
           <View style={styles.amountSheet}>
-            <Text style={styles.amountHeading}>Amount</Text>
+            <Text style={[styles.amountHeading, { fontFamily, fontSize: headerFontSize(fontSize) }]}>
+              Amount
+            </Text>
             <TextInput
-              style={styles.amountInput}
+              style={[styles.amountInput, { fontFamily, fontSize }]}
               value={amountText}
               onChangeText={setAmountText}
               placeholder={`e.g. "12" or "1.2 pounds"`}
@@ -459,17 +461,17 @@ export default function ShoppingSection() {
             />
             <View style={styles.amountActions}>
               <Pressable onPress={clearAmount} style={styles.amountButton}>
-                <Text style={styles.amountClearText}>Clear</Text>
+                <Text style={[styles.amountClearText, { fontFamily, fontSize }]}>Clear</Text>
               </Pressable>
               <View style={styles.amountSpacer} />
               <Pressable
                 onPress={() => setEditingAmountItem(null)}
                 style={styles.amountButton}
               >
-                <Text style={styles.amountCancelText}>Cancel</Text>
+                <Text style={[styles.amountCancelText, { fontFamily, fontSize }]}>Cancel</Text>
               </Pressable>
               <Pressable onPress={commitAmount} style={styles.amountButton}>
-                <Text style={styles.amountSaveText}>Save</Text>
+                <Text style={[styles.amountSaveText, { fontFamily, fontSize }]}>Save</Text>
               </Pressable>
             </View>
           </View>

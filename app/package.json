@@ -3,9 +3,12 @@
   "version": "1.2.2",
   "main": "index.ts",
   "dependencies": {
+    "@expo/vector-icons": "^15.0.2",
     "@react-native-community/datetimepicker": "9.1.0",
     "expo": "^57.0.8",
+    "expo-clipboard": "~57.0.1",
     "expo-constants": "~57.0.7",
+    "expo-font": "~57.0.1",
     "expo-secure-store": "~57.0.1",
     "expo-splash-screen": "~57.0.5",
     "expo-sqlite": "~57.0.1",
