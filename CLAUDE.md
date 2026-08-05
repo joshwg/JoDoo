@@ -47,7 +47,16 @@ Read the exact versioned docs at https://docs.expo.dev/versions/v57.0.0/ before 
 
 `npx expo-doctor` will tell you `@expo/config-plugins` "should not be installed directly" and advise removing it. Do not remove it. `@react-native-community/datetimepicker` 9.1.0 has a config plugin that does a bare `require('@expo/config-plugins')` while declaring it as neither a dependency nor a peer dependency, and SDK 57 nests that package under `expo/node_modules` where the plugin cannot resolve it. Without the top-level copy, `npx expo config` and therefore `expo-doctor`, `expo start`, and `eas build` all fail with `Cannot find module '@expo/config-plugins'`. Doctor's own message allows for this case: "If you installed @expo/config-plugins to fulfill a peer dependency for a config plugin ... you can ignore this warning."
 
-Keep the pin exactly matching the version bundled inside `expo` (check `node_modules/expo/node_modules/@expo/config-plugins/package.json`) so there is only ever one behavioral copy. This can be dropped once datetimepicker switches to the `expo/config-plugins` sub-export.
+Keep the pin matching what `expo` itself depends on, so there is only ever one behavioral copy. Verify with:
+
+```
+npm ls @expo/config-plugins                                       # every entry should say "deduped"
+node -p "require('expo/package.json').dependencies['@expo/config-plugins']"   # the range to satisfy
+```
+
+As of the expo 57.0.9 bump (2026-08-03) npm hoists a single copy to `node_modules/@expo/config-plugins` at 57.0.6, satisfying expo's `~57.0.6`, and there is **no** nested copy under `expo/node_modules` — an earlier version of this note told you to check that path, which no longer exists. A nested copy reappearing means the pin has drifted out of expo's range.
+
+This whole workaround can be dropped once datetimepicker switches to the `expo/config-plugins` sub-export. Re-check by removing the devDependency and running `npx expo config --type public`; if it succeeds, the workaround is no longer needed.
 
 ### Splash screen config
 
