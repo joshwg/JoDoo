@@ -58,6 +58,10 @@ As of the expo 57.0.9 bump (2026-08-03) npm hoists a single copy to `node_module
 
 This whole workaround can be dropped once datetimepicker switches to the `expo/config-plugins` sub-export. Re-check by removing the devDependency and running `npx expo config --type public`; if it succeeds, the workaround is no longer needed.
 
+### npm `overrides` pins `uuid` under `xcode`
+
+`app/package.json` carries `"overrides": { "xcode": { "uuid": "^11.1.1" } }` to clear npm audit's GHSA-w5hq-g745-h8pq: `xcode@3.0.1` (pulled in via `@expo/config-plugins`) declares `uuid@^7`, which is flagged. `xcode` only calls `uuid.v4()`, which v11 still exports, so the override is safe — `npx expo config --type public` verifies the pipeline. The remaining audit findings (high, `image-size <= 2.0.2` reached through metro) had **no fixed upstream release** as of 2026-08-13; re-run `npm audit` after Expo/metro updates before assuming they're still unfixable. All flagged packages are dev/build-time tooling, not code shipped in the app binary.
+
 ### Splash screen config
 
 SDK 57's config schema rejects the top-level `splash` key; splash settings live in the `expo-splash-screen` plugin entry in `app.json` instead. Note that the plugin sizes the image by an explicit `imageWidth` in dp rather than scaling to fit the screen the way the old `resizeMode: contain` did.
@@ -72,13 +76,15 @@ Schema changes go through `ensureColumn()`, which checks `PRAGMA table_info` bec
 
 ### Sharing is a bolt-on, and stays that way
 
-A list becomes shared when it gets a `share_key` (`lists.share_key` for todo lists, the `shopping_share_key` setting for the single shopping list). Everything else about the app is unchanged whether or not a server is configured.
+A list becomes shared when it gets a `share_key` (`lists.share_key` for todo lists, `shopping_lists.share_key` for shopping lists). Everything else about the app is unchanged whether or not a server is configured.
+
+Joining is key-based and kind-agnostic: `joinShare.ts` fetches a key and lands it in whichever section it belongs to, no matter where it was entered. Three entry points feed it: manual key entry, a share link (`https://<server>/join/<key>`, handled by the unauthenticated landing page in `server/join.go` plus the `jodoo://join?key=...&server=...` deep link handled in `App.tsx` — the app's scheme is registered in `app.json`), and QR scanning (`JoinScanModal.tsx`, expo-camera; the QR encodes the https join link and is rendered in `ShareKeyModal.tsx` via react-native-qrcode-svg). Share links and QR codes carry the server address and list key but never the server access key - recipients must configure that out-of-band first. The one sanctioned shortcut for that is the server-setup QR in Server Settings (`serverSetup.ts`): a raw JSON payload (deliberately not a URL - only Jodoo's in-app scanner understands it) that carries the server address and access key from one trusted device to another.
 
 The flow through the sync layer:
 
 - `serverConfig.ts` holds the base URL and server key in `expo-secure-store`. No config means no sync, silently.
 - `syncClient.ts` has the REST calls (`createShare`, `fetchShare`) and `ShareConnection`, an auto-reconnecting WebSocket wrapper with exponential backoff capped at 30s.
-- `syncManager.ts` is the single owner of live connections. `refreshSyncConnections()` tears down and rebuilds every connection; call it after any change to sharing state or server settings. After a local edit, call `pushTodoListIfShared(listId)` or `pushShoppingIfShared()`.
+- `syncManager.ts` is the single owner of live connections. `refreshSyncConnections()` tears down and rebuilds every connection; call it after any change to sharing state or server settings. After a local edit, call `pushTodoListIfShared(listId)` or `pushShoppingListIfShared(listId)`.
 - `remoteUpdates.ts` is a deliberately one-way event bus. Applying a remote snapshot emits an event so the visible screen refreshes, and that path must never loop back into a push. Keep that separation intact when adding sync-aware UI.
 
 ### Reconciliation is uuid-based, whole-list

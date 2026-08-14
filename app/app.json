@@ -2,7 +2,8 @@
   "expo": {
     "name": "Jodoo",
     "slug": "Jodoo",
-    "version": "1.2.2",
+    "version": "1.2.3",
+    "scheme": "jodoo",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
@@ -33,6 +34,12 @@
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Jodoo uses the camera only to scan QR codes for joining shared lists."
+        }
+      ],
       "expo-sqlite",
       "@react-native-community/datetimepicker",
       "expo-secure-store",

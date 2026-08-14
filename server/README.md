@@ -5,6 +5,40 @@ a single todo list or shopping list. It does not replace each app's local
 SQLite database - it only keeps a temporary, synchronized copy of shared
 lists so peers can converge on the same content in real time.
 
+## Build the server
+
+Requires Go >= 1.26.5 (see `go.mod`; the `go` toolchain auto-downloads the
+right version if yours is newer than 1.21). No C compiler is needed - the
+SQLite driver (`modernc.org/sqlite`) is pure Go.
+
+From this directory:
+
+```
+go build -o jodoo-server .
+```
+
+That produces a single self-contained `jodoo-server` binary; copy it to the
+target machine and run it as shown below (nothing else needs to be
+installed there).
+
+To cross-compile for a typical Linux server from any machine:
+
+```
+GOOS=linux GOARCH=amd64 go build -o jodoo-server .
+```
+
+Build from inside the git checkout when you can: Go embeds the commit hash
+and date automatically, which is what `./jodoo-server --version` reports.
+Building from an exported tarball (or with `-buildvcs=false`) still works,
+just without commit info.
+
+Sanity checks after building:
+
+```
+go vet ./...          # static analysis
+bash .smoke_test.sh   # builds, starts on :8099, and walks the REST API
+```
+
 ## Running
 
 ```
@@ -62,15 +96,19 @@ and the WebSocket upgrade (`/ws/{key}`) to the Go service.
 
 ## API
 
-All endpoints require the server key, either as `Authorization: Bearer <key>`
-or query param `?serverKey=<key>` (the latter exists only because some
-WebSocket clients can't set custom headers).
+All endpoints except `GET /join/{key}` require the server key, either as
+`Authorization: Bearer <key>` or query param `?serverKey=<key>` (the latter
+exists only because some WebSocket clients can't set custom headers).
 
 - `POST /api/lists` `{ "kind": "todo"|"shopping", "name": "...", "items": [...] }`
   -> creates a share, returns a freshly generated 20-char lowercase
   alphanumeric key plus the stored snapshot.
 - `GET /api/lists/{key}` -> current snapshot for a share (used to preview/
   fetch before joining).
+- `GET /join/{key}` -> the one unauthenticated endpoint: a small HTML
+  landing page behind share links ("Open in Jodoo" deep link plus the key
+  for manual entry). It never reads the store, so it neither confirms nor
+  denies that a key exists.
 - `GET /ws/{key}` -> upgrades to a WebSocket. On connect the server
   immediately sends `{"type":"snapshot", ...}`. Either side can then send
   `{"type":"update","name":"...","items":[...]}`; the server stores it,

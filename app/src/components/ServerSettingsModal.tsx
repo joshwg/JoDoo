@@ -11,10 +11,13 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import QRCode from 'react-native-qrcode-svg';
 import { clearServerConfig, getServerConfig, setServerConfig } from '../serverConfig';
+import { makeServerSetupPayload, parseServerSetupPayload } from '../serverSetup';
 import { refreshSyncConnections } from '../syncManager';
 import { testServerConnection } from '../syncClient';
 import { useTextSettings } from '../textSettings';
+import QrScanModal from './QrScanModal';
 
 interface Props {
   visible: boolean;
@@ -26,6 +29,8 @@ export default function ServerSettingsModal({ visible, onClose }: Props) {
   const [serverKey, setServerKey] = useState('');
   const [busy, setBusy] = useState(false);
   const [keyVisible, setKeyVisible] = useState(false);
+  const [setupQrVisible, setSetupQrVisible] = useState(false);
+  const [scanVisible, setScanVisible] = useState(false);
   const { scale } = useTextSettings();
 
   useEffect(() => {
@@ -62,6 +67,24 @@ export default function ServerSettingsModal({ visible, onClose }: Props) {
     } finally {
       setBusy(false);
     }
+  };
+
+  const showSetupQr = () => {
+    if (!baseUrl.trim() || !serverKey.trim()) {
+      Alert.alert('Missing info', 'Enter both a server URL and a server key first.');
+      return;
+    }
+    setSetupQrVisible(true);
+  };
+
+  const applyScannedSetup = (config: { baseUrl: string; serverKey: string }) => {
+    setScanVisible(false);
+    setBaseUrl(config.baseUrl);
+    setServerKey(config.serverKey);
+    Alert.alert(
+      'Settings scanned',
+      'Server URL and key filled in. Tap Test to check the connection, then Save.'
+    );
   };
 
   const remove = () => {
@@ -123,6 +146,16 @@ export default function ServerSettingsModal({ visible, onClose }: Props) {
               />
             </Pressable>
           </View>
+          {/* Hand these settings to another device (or take them from one)
+              via QR - in-app only, since the code contains the server key. */}
+          <View style={styles.qrRow}>
+            <Pressable onPress={showSetupQr} style={styles.qrButton} disabled={busy}>
+              <Text style={styles.qrButtonText}>Show Setup QR</Text>
+            </Pressable>
+            <Pressable onPress={() => setScanVisible(true)} style={styles.qrButton} disabled={busy}>
+              <Text style={styles.qrButtonText}>Scan Setup QR</Text>
+            </Pressable>
+          </View>
           {busy && <ActivityIndicator style={styles.spinner} />}
           <View style={styles.actions}>
             <Pressable onPress={remove} style={styles.button} disabled={busy}>
@@ -140,6 +173,56 @@ export default function ServerSettingsModal({ visible, onClose }: Props) {
             </Pressable>
           </View>
         </View>
+
+        {/* Setup QR display - nested so it stacks above this modal on iOS. */}
+        <Modal
+          visible={setupQrVisible}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setSetupQrVisible(false)}
+        >
+          <View style={styles.backdrop}>
+            <View style={[styles.sheet, styles.qrSheet]}>
+              <Text style={styles.heading}>Server Setup QR</Text>
+              <Text style={styles.qrWarning}>
+                ⚠️ This code contains the server address AND the server access key. Show it only
+                to people you trust with access to your server.
+              </Text>
+              {setupQrVisible && (
+                <View style={styles.qrBox}>
+                  <QRCode
+                    value={makeServerSetupPayload({
+                      baseUrl: baseUrl.trim(),
+                      serverKey: serverKey.trim(),
+                    })}
+                    size={200}
+                    backgroundColor="#fff"
+                    color="#000"
+                  />
+                </View>
+              )}
+              <Text style={styles.qrHint}>
+                On the other device: ⚙ → Server Settings → Scan Setup QR.
+              </Text>
+              <Pressable onPress={() => setSetupQrVisible(false)} style={styles.button}>
+                <Text style={styles.primaryText}>Done</Text>
+              </Pressable>
+            </View>
+          </View>
+        </Modal>
+
+        <QrScanModal
+          visible={scanVisible}
+          onCancel={() => setScanVisible(false)}
+          prompt="Point the camera at another device's Server Setup QR."
+          badCodeHint="That QR code is not a Jodoo server setup code - keep looking."
+          onCode={(data) => {
+            const config = parseServerSetupPayload(data);
+            if (!config) return false;
+            applyScannedSetup(config);
+            return true;
+          }}
+        />
       </KeyboardAvoidingView>
     </Modal>
   );
@@ -192,6 +275,44 @@ const styles = StyleSheet.create({
   },
   spinner: {
     marginTop: 12,
+  },
+  qrRow: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: 24,
+    marginTop: 12,
+  },
+  qrButton: {
+    paddingVertical: 6,
+  },
+  qrButtonText: {
+    color: '#1a5fb4',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  qrSheet: {
+    alignItems: 'center',
+  },
+  qrWarning: {
+    fontSize: 13,
+    color: '#B00020',
+    textAlign: 'center',
+    marginTop: 8,
+  },
+  qrBox: {
+    marginTop: 16,
+    marginBottom: 12,
+    padding: 12,
+    backgroundColor: '#fff',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#e0e0e0',
+  },
+  qrHint: {
+    fontSize: 13,
+    color: '#666',
+    textAlign: 'center',
+    marginBottom: 8,
   },
   actions: {
     flexDirection: 'row',

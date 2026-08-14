@@ -1,11 +1,14 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Dimensions,
   FlatList,
   KeyboardAvoidingView,
   Modal,
+  PanResponder,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -14,50 +17,441 @@ import {
 import { APP_NAME, APP_VERSION, BUILD_DATE, COPYRIGHT } from '../appInfo';
 import * as db from '../db';
 import { subscribeRemoteUpdate } from '../remoteUpdates';
-import { createShare, fetchShare, shareExists } from '../syncClient';
-import {
-  pushShoppingIfShared,
-  refreshSyncConnections,
-  SHOPPING_SHARE_KEY_SETTING,
-} from '../syncManager';
+import { joinShareByKey } from '../joinShare';
+import { createShare, shareExists } from '../syncClient';
+import { pushShoppingListIfShared, refreshSyncConnections } from '../syncManager';
 import { headerFontSize, useTextSettings } from '../textSettings';
-import { DictionaryEntry, ShoppingItem } from '../types';
+import { DictionaryEntry, ShoppingItem, ShoppingList } from '../types';
 import DictionaryModal from './DictionaryModal';
 import EnterKeyModal from './EnterKeyModal';
 import FontSettingsModal from './FontSettingsModal';
+import JoinScanModal from './JoinScanModal';
+import ListTab from './ListTab';
 import ServerSettingsModal from './ServerSettingsModal';
 import ShareKeyModal from './ShareKeyModal';
 
 export default function ShoppingSection() {
+  const [lists, setLists] = useState<ShoppingList[]>([]);
+  const [activeListId, setActiveListId] = useState<number | null>(null);
   const [items, setItems] = useState<ShoppingItem[]>([]);
   const [newItem, setNewItem] = useState('');
   const [suggestions, setSuggestions] = useState<DictionaryEntry[]>([]);
   const [menuOpen, setMenuOpen] = useState(false);
   const [dictionaryOpen, setDictionaryOpen] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
+  const [addMenuVisible, setAddMenuVisible] = useState(false);
   const [joinVisible, setJoinVisible] = useState(false);
+  const [scanVisible, setScanVisible] = useState(false);
+  const [renamingList, setRenamingList] = useState<ShoppingList | null>(null);
+  const [renameText, setRenameText] = useState('');
   const [serverSettingsVisible, setServerSettingsVisible] = useState(false);
   const [fontSettingsVisible, setFontSettingsVisible] = useState(false);
   const [shareKeyShown, setShareKeyShown] = useState<string | null>(null);
   const [shareBusy, setShareBusy] = useState(false);
   const [editingAmountItem, setEditingAmountItem] = useState<ShoppingItem | null>(null);
   const [amountText, setAmountText] = useState('');
+  const [draggingListId, setDraggingListId] = useState<number | null>(null);
+  const [dragOverListId, setDragOverListId] = useState<number | null>(null);
   const { fontFamily, fontSize, scale } = useTextSettings();
 
-  const refresh = useCallback(() => setItems(db.getShoppingItems()), []);
+  const refreshLists = useCallback((preferId?: number) => {
+    const all = db.getShoppingLists();
+    setLists(all);
+    setActiveListId((current) => {
+      const want = preferId ?? current;
+      return all.some((l) => l.id === want) ? want! : all[0]?.id ?? null;
+    });
+  }, []);
+
+  const refreshItems = useCallback((listId: number | null) => {
+    setItems(listId == null ? [] : db.getShoppingItems(listId));
+  }, []);
 
   useEffect(() => {
-    refresh();
-  }, [refresh]);
+    refreshLists();
+  }, [refreshLists]);
 
-  // Live-refresh when another peer updates the shared shopping list.
+  useEffect(() => {
+    refreshItems(activeListId);
+  }, [activeListId, refreshItems]);
+
+  // Live-refresh when another peer updates a shared shopping list.
   useEffect(
     () =>
       subscribeRemoteUpdate((target) => {
-        if (target.type === 'shopping') refresh();
+        if (target.type !== 'shopping') return;
+        refreshLists();
+        refreshItems(activeListId);
       }),
-    [refresh]
+    [refreshLists, refreshItems, activeListId]
   );
+
+  const activeList = lists.find((l) => l.id === activeListId) ?? null;
+
+  // ----- tab strip: measurement, scroll-into-view, drag-to-reorder -----
+
+  type Rect = { x: number; y: number; width: number; height: number };
+  const tabRefs = useRef(new Map<number, View>()).current;
+  const tabRectsRef = useRef(new Map<number, Rect>()).current;
+  // Content-relative (not page-relative) tab positions, used to scroll the
+  // active tab into view - distinct from tabRectsRef, which tracks page
+  // coordinates for drag hit-testing.
+  const tabLayoutsRef = useRef(new Map<number, { x: number; width: number }>()).current;
+  const tabStripViewportWidthRef = useRef(0);
+
+  // Auto-scroll the horizontal tab strip while dragging a tab near a screen
+  // edge, so tabs that are currently scrolled off-screen can still be reached.
+  const tabScrollViewRef = useRef<ScrollView>(null);
+  const tabScrollXRef = useRef(0);
+  const dragPageRef = useRef<{ x: number; y: number } | null>(null);
+  const autoScrollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const AUTOSCROLL_EDGE = 48;
+  const AUTOSCROLL_STEP = 16;
+
+  const measureTabs = useCallback(() => {
+    tabRefs.forEach((view, listId) => {
+      view.measureInWindow((x, y, width, height) => {
+        tabRectsRef.set(listId, { x, y, width, height });
+      });
+    });
+  }, [tabRefs, tabRectsRef]);
+
+  const SCROLL_INTO_VIEW_PADDING = 16;
+
+  /** Scrolls the tab strip just enough to bring `listId`'s tab fully into
+   *  view, if it isn't already - e.g. after selecting, creating, or joining
+   *  a list whose tab is currently scrolled off-screen. */
+  const scrollTabIntoView = useCallback(
+    (listId: number) => {
+      const layout = tabLayoutsRef.get(listId);
+      const viewportWidth = tabStripViewportWidthRef.current;
+      if (!layout || !viewportWidth) return;
+      const scrollX = tabScrollXRef.current;
+      const { x, width } = layout;
+      if (x < scrollX + SCROLL_INTO_VIEW_PADDING) {
+        const newX = Math.max(0, x - SCROLL_INTO_VIEW_PADDING);
+        tabScrollXRef.current = newX;
+        tabScrollViewRef.current?.scrollTo({ x: newX, animated: true });
+      } else if (x + width > scrollX + viewportWidth - SCROLL_INTO_VIEW_PADDING) {
+        const newX = Math.max(0, x + width - viewportWidth + SCROLL_INTO_VIEW_PADDING);
+        tabScrollXRef.current = newX;
+        tabScrollViewRef.current?.scrollTo({ x: newX, animated: true });
+      }
+    },
+    [tabLayoutsRef]
+  );
+
+  useEffect(() => {
+    if (activeListId != null) scrollTabIntoView(activeListId);
+  }, [activeListId, scrollTabIntoView]);
+
+  const stopAutoScroll = useCallback(() => {
+    if (autoScrollTimerRef.current != null) {
+      clearInterval(autoScrollTimerRef.current);
+      autoScrollTimerRef.current = null;
+    }
+  }, []);
+
+  const startAutoScroll = useCallback(() => {
+    stopAutoScroll();
+    autoScrollTimerRef.current = setInterval(() => {
+      const point = dragPageRef.current;
+      if (!point) return;
+      const screenWidth = Dimensions.get('window').width;
+      let delta = 0;
+      if (point.x < AUTOSCROLL_EDGE) delta = -AUTOSCROLL_STEP;
+      else if (point.x > screenWidth - AUTOSCROLL_EDGE) delta = AUTOSCROLL_STEP;
+      if (delta !== 0) {
+        const newX = Math.max(0, tabScrollXRef.current + delta);
+        tabScrollViewRef.current?.scrollTo({ x: newX, animated: false });
+        // Tab positions shifted, so re-measure them for accurate drop hit-testing.
+        measureTabs();
+      }
+    }, 32);
+  }, [stopAutoScroll, measureTabs]);
+
+  useEffect(() => stopAutoScroll, [stopAutoScroll]);
+
+  const handleListDragStart = useCallback(
+    (list: ShoppingList) => {
+      measureTabs();
+      setDraggingListId(list.id);
+      setDragOverListId(null);
+      startAutoScroll();
+    },
+    [measureTabs, startAutoScroll]
+  );
+
+  const handleListDragMove = useCallback((_list: ShoppingList, pageX: number, pageY: number) => {
+    dragPageRef.current = { x: pageX, y: pageY };
+    let overId: number | null = null;
+    for (const [listId, rect] of tabRectsRef) {
+      if (pageX >= rect.x && pageX <= rect.x + rect.width) {
+        overId = listId;
+        break;
+      }
+    }
+    setDragOverListId(overId);
+  }, [tabRectsRef]);
+
+  const handleListDragEnd = useCallback(
+    (list: ShoppingList) => {
+      stopAutoScroll();
+      dragPageRef.current = null;
+      setDraggingListId(null);
+      const overId = dragOverListIdRef.current;
+      setDragOverListId(null);
+
+      if (overId != null && overId !== list.id) {
+        const current = listsRef.current;
+        const withoutDragged = current.filter((l) => l.id !== list.id);
+        const targetIndex = withoutDragged.findIndex((l) => l.id === overId);
+        // Dragging right drops AFTER the hovered tab, dragging left drops
+        // BEFORE it - so the dragged tab takes the hovered tab's place in
+        // both directions, and dropping on the last tab from the left makes
+        // the dragged list the last one.
+        const fromIndex = current.findIndex((l) => l.id === list.id);
+        const toIndex = current.findIndex((l) => l.id === overId);
+        let insertAt = targetIndex === -1 ? withoutDragged.length : targetIndex;
+        if (targetIndex !== -1 && fromIndex !== -1 && fromIndex < toIndex) {
+          insertAt = targetIndex + 1;
+        }
+        withoutDragged.splice(insertAt, 0, list);
+        db.reorderShoppingLists(withoutDragged.map((l) => l.id));
+        refreshLists(list.id);
+      }
+    },
+    [refreshLists, stopAutoScroll]
+  );
+
+  // ----- swipe-to-switch-list -----
+
+  // Keep refs in sync so the PanResponder (created once) always sees fresh data.
+  const listsRef = useRef(lists);
+  useEffect(() => {
+    listsRef.current = lists;
+  }, [lists]);
+  const activeListIdRef = useRef(activeListId);
+  useEffect(() => {
+    activeListIdRef.current = activeListId;
+  }, [activeListId]);
+  // Drag-over target must also be a ref: the useCallback closure for
+  // handleListDragEnd would otherwise capture stale state because React may
+  // not have flushed the latest set* from handleListDragMove.
+  const dragOverListIdRef = useRef(dragOverListId);
+  useEffect(() => {
+    dragOverListIdRef.current = dragOverListId;
+  }, [dragOverListId]);
+
+  const switchListByOffset = useCallback((offset: number) => {
+    const currentLists = listsRef.current;
+    if (currentLists.length < 2) return;
+    const currentIndex = currentLists.findIndex((l) => l.id === activeListIdRef.current);
+    const baseIndex = currentIndex === -1 ? 0 : currentIndex;
+    // Wrap around in both directions, e.g. sliding past the last list rolls back to the first.
+    const nextIndex = (baseIndex + offset + currentLists.length) % currentLists.length;
+    setActiveListId(currentLists[nextIndex].id);
+  }, []);
+
+  const SWIPE_THRESHOLD = 50;
+  const panResponder = useRef(
+    PanResponder.create({
+      // Only claim single-finger drags, so a two-finger swipe (which switches
+      // between the To Do / Shopping sections) is left for the parent to handle.
+      onMoveShouldSetPanResponder: (evt, gestureState) =>
+        evt.nativeEvent.touches.length === 1 &&
+        Math.abs(gestureState.dx) > 20 &&
+        Math.abs(gestureState.dx) > Math.abs(gestureState.dy) * 1.5,
+      onPanResponderRelease: (_evt, gestureState) => {
+        if (gestureState.dx <= -SWIPE_THRESHOLD) {
+          switchListByOffset(1); // swipe left -> next list
+        } else if (gestureState.dx >= SWIPE_THRESHOLD) {
+          switchListByOffset(-1); // swipe right -> previous list
+        }
+      },
+    }),
+  ).current;
+
+  // ----- tab actions -----
+
+  const addList = () => {
+    const created = db.createShoppingList();
+    refreshLists(created.id);
+  };
+
+  const openAddMenu = () => setAddMenuVisible(true);
+
+  const startNewList = () => {
+    setAddMenuVisible(false);
+    addList();
+  };
+
+  const startJoinList = () => {
+    setAddMenuVisible(false);
+    setJoinVisible(true);
+  };
+
+  const startScanList = () => {
+    setAddMenuVisible(false);
+    setScanVisible(true);
+  };
+
+  const joinFromScan = async (key: string) => {
+    setScanVisible(false);
+    try {
+      await joinSharedList(key);
+    } catch (err) {
+      Alert.alert('Could not join list', err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const confirmDeleteAllLists = () => {
+    setAddMenuVisible(false);
+    Alert.alert(
+      'Delete all lists',
+      'Delete every shopping list and all of their items? This cannot be undone. Copies of shared lists on other devices are not affected.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete All',
+          style: 'destructive',
+          onPress: () => {
+            db.deleteAllShoppingLists();
+            refreshLists();
+            refreshSyncConnections();
+          },
+        },
+      ]
+    );
+  };
+
+  const joinSharedList = async (key: string) => {
+    // A todo key entered here still joins - it just lands in the To Do
+    // section instead of being rejected.
+    const result = await joinShareByKey(key);
+    if (result.kind === 'shopping') {
+      refreshLists(result.listId);
+    } else {
+      Alert.alert(
+        'Todo list joined',
+        'That key belongs to a shared todo list, so it was added to your To Do section.'
+      );
+    }
+    setJoinVisible(false);
+  };
+
+  const openRename = (list: ShoppingList) => {
+    setRenamingList(list);
+    setRenameText(list.name);
+  };
+
+  const commitRename = () => {
+    if (renamingList && renameText.trim()) {
+      db.renameShoppingList(renamingList.id, renameText);
+      pushShoppingListIfShared(renamingList.id);
+      refreshLists();
+    }
+    setRenamingList(null);
+  };
+
+  /** Creates a fresh share for a list (first share or replacing a stale
+   *  key), seeds it with current content, and shows the new key. */
+  const createNewShare = async (list: ShoppingList) => {
+    setShareBusy(true);
+    try {
+      const snapshot = await createShare(
+        'shopping',
+        list.name,
+        db.getShoppingSyncRecords(list.id) as unknown as Record<string, unknown>[]
+      );
+      db.setShoppingListShareKey(list.id, snapshot.key, snapshot.version);
+      refreshLists();
+      await refreshSyncConnections();
+      setRenamingList(null);
+      setShareKeyShown(snapshot.key);
+    } catch (err) {
+      Alert.alert('Could not share list', err instanceof Error ? err.message : String(err));
+    } finally {
+      setShareBusy(false);
+    }
+  };
+
+  const shareList = async (list: ShoppingList) => {
+    if (!list.shareKey) {
+      await createNewShare(list);
+      return;
+    }
+    // View Key: verify the share still exists before showing a key that no
+    // longer works. Fail open - an unreachable server is not a dead share.
+    const key = list.shareKey;
+    let exists = true;
+    setShareBusy(true);
+    try {
+      exists = await shareExists(key);
+    } catch {
+      // Could not verify (offline, server down); behave as before.
+    } finally {
+      setShareBusy(false);
+    }
+    setRenamingList(null);
+    if (exists) {
+      setShareKeyShown(key);
+      return;
+    }
+    Alert.alert(
+      'Share no longer exists',
+      'The server does not recognize this key anymore - the server data was reset, or the share expired after 30 days without updates. Your list is safe on this device, but it is not syncing.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Unshare',
+          onPress: () => {
+            db.detachShoppingList(list.id);
+            refreshLists();
+            refreshSyncConnections();
+          },
+        },
+        { text: 'New Key', onPress: () => void createNewShare(list) },
+      ]
+    );
+  };
+
+  const confirmDetachList = (list: ShoppingList) => {
+    setRenamingList(null);
+    Alert.alert(
+      'Stop syncing',
+      `Keep "${list.name}" on this device but disconnect it from the shared copy? Other users keep the list and can continue sharing it.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Unshare',
+          onPress: () => {
+            db.detachShoppingList(list.id);
+            refreshLists();
+            refreshSyncConnections();
+          },
+        },
+      ]
+    );
+  };
+
+  const confirmDeleteList = (list: ShoppingList) => {
+    setRenamingList(null);
+    Alert.alert('Delete list', `Delete "${list.name}" and all of its items?`, [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: () => {
+          db.deleteShoppingList(list.id);
+          refreshLists();
+          refreshSyncConnections();
+        },
+      },
+    ]);
+  };
+
+  // ----- item actions -----
 
   const changeInput = (text: string) => {
     setNewItem(text);
@@ -65,6 +459,7 @@ export default function ShoppingSection() {
   };
 
   const addItem = (raw: string) => {
+    if (activeListId == null) return;
     const trimmed = raw.trim();
     if (!trimmed) return;
     // Shorthand "item, amount" - split off the amount before it ever
@@ -75,11 +470,11 @@ export default function ShoppingSection() {
     if (!name) return;
     // Learns new items and bumps usage/casing for known ones.
     db.recordItemUse(name);
-    db.addShoppingItem(name, amount);
+    db.addShoppingItem(activeListId, name, amount);
     setNewItem('');
     setSuggestions([]);
-    refresh();
-    pushShoppingIfShared();
+    refreshItems(activeListId);
+    pushShoppingListIfShared(activeListId);
   };
 
   const openAmountEditor = (item: ShoppingItem) => {
@@ -91,271 +486,215 @@ export default function ShoppingSection() {
     if (!editingAmountItem) return;
     db.setShoppingAmount(editingAmountItem.id, amountText);
     setEditingAmountItem(null);
-    refresh();
-    pushShoppingIfShared();
+    refreshItems(activeListId);
+    pushShoppingListIfShared(editingAmountItem.listId);
   };
 
   const clearAmount = () => {
     if (!editingAmountItem) return;
     db.setShoppingAmount(editingAmountItem.id, null);
     setEditingAmountItem(null);
-    refresh();
-    pushShoppingIfShared();
-  };
-
-  /** Creates a fresh shopping share (first share or replacing a stale key)
-   *  seeded with current items, and shows the new key. */
-  const createNewShoppingShare = async () => {
-    setShareBusy(true);
-    try {
-      const snapshot = await createShare(
-        'shopping',
-        'Shopping',
-        db.getShoppingSyncRecords() as unknown as Record<string, unknown>[]
-      );
-      db.setSetting(SHOPPING_SHARE_KEY_SETTING, snapshot.key);
-      db.bindShoppingShare(snapshot.version);
-      await refreshSyncConnections();
-      setMenuOpen(false);
-      setShareKeyShown(snapshot.key);
-    } catch (err) {
-      Alert.alert('Could not share list', err instanceof Error ? err.message : String(err));
-    } finally {
-      setShareBusy(false);
-    }
-  };
-
-  const shareShoppingList = async () => {
-    const existingKey = db.getSetting(SHOPPING_SHARE_KEY_SETTING);
-    if (!existingKey) {
-      await createNewShoppingShare();
-      return;
-    }
-    // View Key: verify the share still exists before showing a key that no
-    // longer works. Fail open - an unreachable server is not a dead share.
-    let exists = true;
-    setShareBusy(true);
-    try {
-      exists = await shareExists(existingKey);
-    } catch {
-      // Could not verify (offline, server down); behave as before.
-    } finally {
-      setShareBusy(false);
-    }
-    setMenuOpen(false);
-    if (exists) {
-      setShareKeyShown(existingKey);
-      return;
-    }
-    Alert.alert(
-      'Share no longer exists',
-      'The server does not recognize this key anymore - the server data was reset, or the share expired after 30 days without updates. Your items are safe on this device, but they are not syncing.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Stop Syncing',
-          onPress: () => {
-            db.detachShoppingShare();
-            refresh();
-            refreshSyncConnections();
-          },
-        },
-        { text: 'New Key', onPress: () => void createNewShoppingShare() },
-      ]
-    );
-  };
-
-  const joinSharedShoppingList = async (key: string) => {
-    const snapshot = await fetchShare(key);
-    if (snapshot.kind !== 'shopping') {
-      throw new Error('That key belongs to a todo list, not the shopping list.');
-    }
-    // Re-entering the key we're already bound to must not wipe local edits
-    // the live sync path hasn't pushed yet; the connection reconciles them.
-    if (db.getSetting(SHOPPING_SHARE_KEY_SETTING) !== key) {
-      db.clearAllShoppingItems();
-      db.applySyncedShoppingItems(
-        snapshot.items as unknown as db.SyncShoppingItem[],
-        snapshot.version
-      );
-      db.setSetting(SHOPPING_SHARE_KEY_SETTING, key);
-    }
-    refresh();
-    await refreshSyncConnections();
-    setJoinVisible(false);
-  };
-
-  const confirmDetachShopping = () => {
-    setMenuOpen(false);
-    Alert.alert(
-      'Stop syncing',
-      'Keep your shopping list on this device but disconnect it from the shared copy? Other users keep the list and can continue sharing it.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Unshare',
-          onPress: () => {
-            db.detachShoppingShare();
-            refresh();
-            refreshSyncConnections();
-          },
-        },
-      ]
-    );
-  };
-
-  const confirmDeleteShoppingList = () => {
-    setMenuOpen(false);
-    Alert.alert(
-      'Delete shopping list',
-      "Delete every shopping item, restore the default dictionary, and disconnect from any shared list? Other users' copies are not affected.",
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Delete All',
-          style: 'destructive',
-          onPress: () => {
-            db.resetShoppingList();
-            refresh();
-            refreshSyncConnections();
-          },
-        },
-      ]
-    );
+    refreshItems(activeListId);
+    pushShoppingListIfShared(editingAmountItem.listId);
   };
 
   const hasChecked = items.some((i) => i.checked);
 
   return (
     <View style={styles.container}>
-      {/* Line 1: title with settings on the far right. */}
-      <View style={styles.headerRow}>
-        <Text style={[styles.heading, { fontFamily, fontSize: headerFontSize(fontSize) }]}>Shopping</Text>
-        <Pressable
-          onPress={() => setMenuOpen(true)}
-          hitSlop={8}
-          accessibilityLabel="Settings"
-          style={styles.settingsButton}
-        >
-          <Text style={[styles.settingsIcon, { fontSize: 22 * scale }]}>⚙</Text>
+      {/* Tab strip: one tab per list plus a "+" tab that creates or joins a list. */}
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        ref={tabScrollViewRef}
+        onLayout={(e) => {
+          tabStripViewportWidthRef.current = e.nativeEvent.layout.width;
+        }}
+        onScroll={(e) => {
+          tabScrollXRef.current = e.nativeEvent.contentOffset.x;
+        }}
+        scrollEventThrottle={32}
+        style={styles.tabStrip}
+        contentContainerStyle={styles.tabStripContent}
+      >
+        {lists.map((list) => (
+          <ListTab
+            key={list.id}
+            ref={(r) => {
+              if (r) tabRefs.set(list.id, r);
+              else tabRefs.delete(list.id);
+            }}
+            list={list}
+            dragging={draggingListId === list.id}
+            dragHitSlop={0}
+            style={[
+              styles.tab,
+              list.id === activeListId && styles.tabActive,
+              dragOverListId === list.id && styles.tabDragOver,
+            ]}
+            textStyle={[
+              styles.tabText,
+              list.id === activeListId && styles.tabTextActive,
+              { fontFamily, fontSize: 14 * scale },
+            ]}
+            onSelect={() => setActiveListId(list.id)}
+            onRename={() => openRename(list)}
+            onDragStart={handleListDragStart}
+            onDragMove={handleListDragMove}
+            onDragEnd={handleListDragEnd}
+            onLayout={(e) => {
+              tabLayoutsRef.set(list.id, {
+                x: e.nativeEvent.layout.x,
+                width: e.nativeEvent.layout.width,
+              });
+              // The just-created/just-selected tab may not have had a
+              // recorded layout yet when the activeListId effect ran.
+              if (list.id === activeListId) scrollTabIntoView(list.id);
+            }}
+          />
+        ))}
+        <Pressable onPress={openAddMenu} style={styles.tab} accessibilityLabel="Add list">
+          <Text style={[styles.plusTab, { fontSize: 16 * scale }]}>+</Text>
         </Pressable>
-      </View>
+      </ScrollView>
 
-      {/* Line 2: add item. */}
-      <View style={styles.addRow}>
-        <TextInput
-          style={[styles.input, { fontFamily, fontSize }]}
-          placeholder="Add an item…"
-          value={newItem}
-          onChangeText={changeInput}
-          onSubmitEditing={() => addItem(newItem)}
-          returnKeyType="done"
-          blurOnSubmit={false}
-          maxLength={db.MAX_SHOPPING_ITEM_NAME_LENGTH}
-        />
-        <Pressable
-          onPress={() => addItem(newItem)}
-          style={[
-            styles.addButton,
-            { width: 38 * scale, height: 38 * scale, borderRadius: 19 * scale },
-          ]}
-          accessibilityLabel="Add item"
-        >
-          <Text style={[styles.addPlus, { fontSize: 24 * scale, lineHeight: 28 * scale }]}>+</Text>
-        </Pressable>
-      </View>
-
-      {/* Autocomplete: up to 3 dictionary matches, most-used first. */}
-      {suggestions.length > 0 && (
-        <View style={styles.suggestionRow}>
-          {suggestions.map((s) => (
-            <Pressable key={s.id} style={styles.suggestionChip} onPress={() => addItem(s.name)}>
-              <Text style={styles.suggestionText} numberOfLines={1}>
-                {s.name}
-              </Text>
-            </Pressable>
-          ))}
+      {/* Header + items: a one-finger horizontal slide here switches lists. */}
+      <View style={styles.swipeArea} {...panResponder.panHandlers}>
+        {/* Line 1: active list name with settings on the far right. */}
+        <View style={styles.headerRow}>
+          <Text
+            style={[styles.heading, { fontFamily, fontSize: headerFontSize(fontSize) }]}
+            numberOfLines={1}
+          >
+            {activeList?.name ?? ''}
+          </Text>
+          <Pressable
+            onPress={() => setMenuOpen(true)}
+            hitSlop={8}
+            accessibilityLabel="Settings"
+            style={styles.settingsButton}
+          >
+            <Text style={[styles.settingsIcon, { fontSize: 22 * scale }]}>⚙</Text>
+          </Pressable>
         </View>
-      )}
 
-      <FlatList
-        data={items}
-        keyExtractor={(i) => String(i.id)}
-        renderItem={({ item }) => (
-          <View style={[styles.itemRow, { paddingHorizontal: 16 * scale, paddingVertical: 10 * scale }]}>
-            <Pressable
-              style={styles.itemMain}
-              onPress={() => {
-                db.setShoppingChecked(item.id, !item.checked);
-                refresh();
-                pushShoppingIfShared();
-              }}
-            >
-              <View
-                style={[
-                  styles.checkbox,
-                  item.checked && styles.checkboxChecked,
-                  { width: 22 * scale, height: 22 * scale, borderRadius: 4 * scale },
-                ]}
-              >
-                {item.checked && (
-                  <Text style={[styles.checkMark, { fontSize: 14 * scale }]}>✓</Text>
-                )}
-              </View>
-              <Text
-                style={[
-                  styles.itemText,
-                  item.checked && styles.checkedText,
-                  { fontFamily, fontSize },
-                ]}
-                numberOfLines={1}
-              >
-                {item.name}
-                {item.amount != null && (
-                  <Text onPress={() => openAmountEditor(item)}> ({item.amount})</Text>
-                )}
-              </Text>
-            </Pressable>
-            <Pressable
-              onPress={() => openAmountEditor(item)}
-              hitSlop={10}
-              style={styles.amountControls}
-              accessibilityLabel={item.amount == null ? 'Set amount' : 'Edit amount'}
-            >
-              <Text style={[styles.amountBtn, { fontSize: 18 * scale }]}>+</Text>
-            </Pressable>
-            <Pressable
-              onPress={() => {
-                db.deleteShoppingItem(item.id);
-                refresh();
-                pushShoppingIfShared();
-              }}
-              hitSlop={10}
-              style={styles.deleteTouch}
-              accessibilityLabel="Delete item"
-            >
-              <Text style={[styles.delete, { fontSize: 16 * scale }]}>✕</Text>
-            </Pressable>
+        {/* Line 2: add item. */}
+        <View style={styles.addRow}>
+          <TextInput
+            style={[styles.input, { fontFamily, fontSize }]}
+            placeholder="Add an item…"
+            value={newItem}
+            onChangeText={changeInput}
+            onSubmitEditing={() => addItem(newItem)}
+            returnKeyType="done"
+            blurOnSubmit={false}
+            maxLength={db.MAX_SHOPPING_ITEM_NAME_LENGTH}
+          />
+          <Pressable
+            onPress={() => addItem(newItem)}
+            style={[
+              styles.addButton,
+              { width: 38 * scale, height: 38 * scale, borderRadius: 19 * scale },
+            ]}
+            accessibilityLabel="Add item"
+          >
+            <Text style={[styles.addPlus, { fontSize: 24 * scale, lineHeight: 28 * scale }]}>+</Text>
+          </Pressable>
+        </View>
+
+        {/* Autocomplete: up to 3 dictionary matches, most-used first. */}
+        {suggestions.length > 0 && (
+          <View style={styles.suggestionRow}>
+            {suggestions.map((s) => (
+              <Pressable key={s.id} style={styles.suggestionChip} onPress={() => addItem(s.name)}>
+                <Text style={styles.suggestionText} numberOfLines={1}>
+                  {s.name}
+                </Text>
+              </Pressable>
+            ))}
           </View>
         )}
-        ListEmptyComponent={
-          <Text style={styles.empty}>Shopping list is empty. Add an item above.</Text>
-        }
-        contentContainerStyle={styles.listContent}
-      />
 
-      {hasChecked && (
-        <Pressable
-          onPress={() => {
-            db.clearCheckedShoppingItems();
-            refresh();
-            pushShoppingIfShared();
-          }}
-          style={styles.clearButton}
-        >
-          <Text style={styles.clearText}>Clear checked items</Text>
-        </Pressable>
-      )}
+        <FlatList
+          data={items}
+          keyExtractor={(i) => String(i.id)}
+          renderItem={({ item }) => (
+            <View style={[styles.itemRow, { paddingHorizontal: 16 * scale, paddingVertical: 10 * scale }]}>
+              <Pressable
+                style={styles.itemMain}
+                onPress={() => {
+                  db.setShoppingChecked(item.id, !item.checked);
+                  refreshItems(activeListId);
+                  pushShoppingListIfShared(item.listId);
+                }}
+              >
+                <View
+                  style={[
+                    styles.checkbox,
+                    item.checked && styles.checkboxChecked,
+                    { width: 22 * scale, height: 22 * scale, borderRadius: 4 * scale },
+                  ]}
+                >
+                  {item.checked && (
+                    <Text style={[styles.checkMark, { fontSize: 14 * scale }]}>✓</Text>
+                  )}
+                </View>
+                <Text
+                  style={[
+                    styles.itemText,
+                    item.checked && styles.checkedText,
+                    { fontFamily, fontSize },
+                  ]}
+                  numberOfLines={1}
+                >
+                  {item.name}
+                  {item.amount != null && (
+                    <Text onPress={() => openAmountEditor(item)}> ({item.amount})</Text>
+                  )}
+                </Text>
+              </Pressable>
+              <Pressable
+                onPress={() => openAmountEditor(item)}
+                hitSlop={10}
+                style={styles.amountControls}
+                accessibilityLabel={item.amount == null ? 'Set amount' : 'Edit amount'}
+              >
+                <Text style={[styles.amountBtn, { fontSize: 18 * scale }]}>+</Text>
+              </Pressable>
+              <Pressable
+                onPress={() => {
+                  db.deleteShoppingItem(item.id);
+                  refreshItems(activeListId);
+                  pushShoppingListIfShared(item.listId);
+                }}
+                hitSlop={10}
+                style={styles.deleteTouch}
+                accessibilityLabel="Delete item"
+              >
+                <Text style={[styles.delete, { fontSize: 16 * scale }]}>✕</Text>
+              </Pressable>
+            </View>
+          )}
+          ListEmptyComponent={
+            <Text style={styles.empty}>Shopping list is empty. Add an item above.</Text>
+          }
+          contentContainerStyle={styles.listContent}
+        />
+
+        {hasChecked && (
+          <Pressable
+            onPress={() => {
+              if (activeListId == null) return;
+              db.clearCheckedShoppingItems(activeListId);
+              refreshItems(activeListId);
+              pushShoppingListIfShared(activeListId);
+            }}
+            style={styles.clearButton}
+          >
+            <Text style={styles.clearText}>Clear checked items</Text>
+          </Pressable>
+        )}
+      </View>
 
       {/* Settings dropdown anchored under the gear. */}
       <Modal
@@ -374,30 +713,6 @@ export default function ShoppingSection() {
               }}
             >
               <Text style={styles.menuText}>Dictionary</Text>
-            </Pressable>
-            <View style={styles.menuDivider} />
-            <Pressable style={styles.menuItem} onPress={shareShoppingList} disabled={shareBusy}>
-              <Text style={styles.menuText}>
-                {db.getSetting(SHOPPING_SHARE_KEY_SETTING) ? 'View Share Key' : 'Share This List'}
-              </Text>
-            </Pressable>
-            {db.getSetting(SHOPPING_SHARE_KEY_SETTING) != null && (
-              <>
-                <View style={styles.menuDivider} />
-                <Pressable style={styles.menuItem} onPress={confirmDetachShopping}>
-                  <Text style={styles.menuText}>Stop Syncing</Text>
-                </Pressable>
-              </>
-            )}
-            <View style={styles.menuDivider} />
-            <Pressable
-              style={styles.menuItem}
-              onPress={() => {
-                setMenuOpen(false);
-                setJoinVisible(true);
-              }}
-            >
-              <Text style={styles.menuText}>Join Shared List</Text>
             </Pressable>
             <View style={styles.menuDivider} />
             <Pressable
@@ -420,10 +735,6 @@ export default function ShoppingSection() {
               <Text style={styles.menuText}>Font Settings</Text>
             </Pressable>
             <View style={styles.menuDivider} />
-            <Pressable style={styles.menuItem} onPress={confirmDeleteShoppingList}>
-              <Text style={styles.menuDangerText}>Delete Shopping List</Text>
-            </Pressable>
-            <View style={styles.menuDivider} />
             <Pressable
               style={styles.menuItem}
               onPress={() => {
@@ -432,6 +743,93 @@ export default function ShoppingSection() {
               }}
             >
               <Text style={styles.menuText}>About</Text>
+            </Pressable>
+          </View>
+        </Pressable>
+      </Modal>
+
+      {/* Rename / share / delete list dialog (opened by long-pressing a tab). */}
+      <Modal
+        visible={renamingList != null}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setRenamingList(null)}
+      >
+        <View style={styles.backdrop}>
+          <KeyboardAvoidingView behavior="padding">
+            <View style={styles.renameSheet}>
+              <Text style={styles.renameHeading}>Rename list</Text>
+              <TextInput
+                style={styles.renameInput}
+                value={renameText}
+                onChangeText={setRenameText}
+                autoFocus
+                selectTextOnFocus
+              />
+              {renamingList?.shareKey && <Text style={styles.sharedNote}>🔗 This list is shared</Text>}
+              {shareBusy && <ActivityIndicator style={styles.renameSpinner} />}
+              <View style={styles.renameActions}>
+                <Pressable
+                  onPress={() => renamingList && confirmDeleteList(renamingList)}
+                  style={styles.renameButton}
+                  disabled={shareBusy}
+                >
+                  <Text style={styles.deleteText}>Delete</Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => renamingList && shareList(renamingList)}
+                  style={styles.renameButton}
+                  disabled={shareBusy}
+                >
+                  <Text style={styles.shareText}>
+                    {renamingList?.shareKey ? 'View Key' : 'Share'}
+                  </Text>
+                </Pressable>
+                {renamingList?.shareKey != null && (
+                  <Pressable
+                    onPress={() => renamingList && confirmDetachList(renamingList)}
+                    style={styles.renameButton}
+                    disabled={shareBusy}
+                  >
+                    <Text style={styles.shareText}>Unshare</Text>
+                  </Pressable>
+                )}
+                <View style={styles.renameSpacer} />
+                <Pressable onPress={() => setRenamingList(null)} style={styles.renameButton}>
+                  <Text style={styles.cancelText}>Cancel</Text>
+                </Pressable>
+                <Pressable onPress={commitRename} style={styles.renameButton}>
+                  <Text style={styles.saveText}>Save</Text>
+                </Pressable>
+              </View>
+            </View>
+          </KeyboardAvoidingView>
+        </View>
+      </Modal>
+
+      {/* "+" chooser: start a brand new list, or join one someone shared with you. */}
+      <Modal
+        visible={addMenuVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setAddMenuVisible(false)}
+      >
+        <Pressable style={styles.addMenuBackdrop} onPress={() => setAddMenuVisible(false)}>
+          <View style={styles.addMenu}>
+            <Pressable style={styles.menuItem} onPress={startNewList}>
+              <Text style={styles.menuText}>New List</Text>
+            </Pressable>
+            <View style={styles.menuDivider} />
+            <Pressable style={styles.menuItem} onPress={startJoinList}>
+              <Text style={styles.menuText}>Join Shared List</Text>
+            </Pressable>
+            <View style={styles.menuDivider} />
+            <Pressable style={styles.menuItem} onPress={startScanList}>
+              <Text style={styles.menuText}>Scan QR Code</Text>
+            </Pressable>
+            <View style={styles.menuDivider} />
+            <Pressable style={styles.menuItem} onPress={confirmDeleteAllLists}>
+              <Text style={styles.menuDangerText}>Delete All Lists</Text>
             </Pressable>
           </View>
         </Pressable>
@@ -483,9 +881,15 @@ export default function ShoppingSection() {
       <EnterKeyModal
         visible={joinVisible}
         title="Join Shared List"
-        body="This replaces your current shopping list with the shared one and keeps them in sync."
+        body="Enter the share key someone gave you to add their list here."
         onCancel={() => setJoinVisible(false)}
-        onSubmit={joinSharedShoppingList}
+        onSubmit={joinSharedList}
+      />
+
+      <JoinScanModal
+        visible={scanVisible}
+        onCancel={() => setScanVisible(false)}
+        onScanned={(key) => void joinFromScan(key)}
       />
 
       <ShareKeyModal
@@ -538,6 +942,49 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#fffdf5',
   },
+  tabStrip: {
+    flexGrow: 0,
+    backgroundColor: '#f2f0e8',
+  },
+  tabStripContent: {
+    paddingHorizontal: 8,
+    paddingTop: 8,
+  },
+  tab: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderTopLeftRadius: 8,
+    borderTopRightRadius: 8,
+    backgroundColor: '#e3e0d3',
+    marginRight: 4,
+    maxWidth: 160,
+    justifyContent: 'center',
+  },
+  tabActive: {
+    backgroundColor: '#fffdf5',
+  },
+  tabDragOver: {
+    backgroundColor: '#d6e6fb',
+    borderColor: '#1a5fb4',
+    borderWidth: 2,
+    borderStyle: 'solid',
+  },
+  tabText: {
+    fontSize: 14,
+    color: '#666',
+  },
+  tabTextActive: {
+    color: '#222',
+    fontWeight: 'bold',
+  },
+  plusTab: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    color: '#555',
+  },
+  swipeArea: {
+    flex: 1,
+  },
   headerRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -547,6 +994,7 @@ const styles = StyleSheet.create({
     paddingBottom: 2,
   },
   heading: {
+    flex: 1,
     fontSize: 18,
     fontWeight: 'bold',
     color: '#222',
@@ -742,6 +1190,69 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '600',
   },
+  backdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    justifyContent: 'center',
+    padding: 24,
+  },
+  renameSheet: {
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    padding: 16,
+  },
+  renameHeading: {
+    fontSize: 16,
+    fontWeight: 'bold',
+    marginBottom: 10,
+    color: '#222',
+  },
+  renameInput: {
+    borderWidth: 1,
+    borderColor: '#ccc',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    fontSize: 15,
+    color: '#222',
+  },
+  renameActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 12,
+  },
+  renameSpacer: {
+    flex: 1,
+  },
+  renameButton: {
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+  },
+  deleteText: {
+    color: '#B00020',
+    fontSize: 15,
+  },
+  cancelText: {
+    color: '#666',
+    fontSize: 15,
+  },
+  saveText: {
+    color: '#1a5fb4',
+    fontWeight: 'bold',
+    fontSize: 15,
+  },
+  shareText: {
+    color: '#1a5fb4',
+    fontSize: 15,
+  },
+  sharedNote: {
+    marginTop: 8,
+    fontSize: 13,
+    color: '#666',
+  },
+  renameSpinner: {
+    marginTop: 8,
+  },
   menuBackdrop: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.15)',
@@ -758,6 +1269,23 @@ const styles = StyleSheet.create({
     shadowRadius: 6,
     shadowOffset: { width: 0, height: 3 },
     minWidth: 150,
+    paddingVertical: 4,
+  },
+  addMenuBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.15)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  addMenu: {
+    backgroundColor: '#fff',
+    borderRadius: 8,
+    elevation: 6,
+    shadowColor: '#000',
+    shadowOpacity: 0.25,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 3 },
+    minWidth: 200,
     paddingVertical: 4,
   },
   menuItem: {

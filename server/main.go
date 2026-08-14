@@ -18,7 +18,7 @@ import (
 )
 
 // Version is the server's release version, bumped alongside the client.
-const Version = "1.2.2"
+const Version = "1.2.3"
 
 // shareRetention is how long a share survives without receiving an update
 // before the periodic sweep deletes it. Any edit resets the clock.
@@ -110,6 +110,8 @@ func main() {
 	mux.HandleFunc("POST /api/lists", s.requireAuth(s.handleCreateShare))
 	mux.HandleFunc("GET /api/lists/{key}", s.requireAuth(s.handleGetShare))
 	mux.HandleFunc("GET /ws/{key}", s.requireAuth(s.handleWS))
+	// Unauthenticated by design - see handleJoinPage.
+	mux.HandleFunc("GET /join/{key}", s.handleJoinPage)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("ok " + Version))

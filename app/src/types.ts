@@ -26,8 +26,13 @@ export interface DictionaryEntry {
   uses: number;
 }
 
+/** Shopping lists carry exactly the same fields as todo lists, so they can
+ *  share UI (e.g. ListTab) and sync plumbing. */
+export type ShoppingList = TodoList;
+
 export interface ShoppingItem {
   id: number;
+  listId: number;
   /** Stable identifier used to reconcile this item across devices when the
    *  shopping list is shared; generated locally and never reused. */
   uuid: string;

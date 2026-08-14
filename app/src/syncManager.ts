@@ -3,11 +3,9 @@ import { emitRemoteUpdate } from './remoteUpdates';
 import { getServerConfig } from './serverConfig';
 import { RemoteItem, ShareConnection, SharePayload } from './syncClient';
 
-export { SHOPPING_SHARE_KEY_SETTING } from './db';
-
 interface ManagedConnection {
   kind: 'todo' | 'shopping';
-  listId?: number;
+  listId: number;
   conn: ShareConnection;
 }
 
@@ -72,26 +70,35 @@ function handleTodoSnapshot(
   if (needPush) conn.send(name, toRemoteItems(merged), state.updatedAt);
 }
 
-/** Same flow as {@link handleTodoSnapshot}, for the shopping list (which has
- *  a fixed name, so only the records are merged). */
-function handleShoppingSnapshot(key: string, conn: ShareConnection, snapshot: SharePayload): void {
-  if (db.getSetting(db.SHOPPING_SHARE_KEY_SETTING) !== key) return;
-  const state = db.getShoppingSyncState();
+/** Same flow as {@link handleTodoSnapshot}, for one shopping list. */
+function handleShoppingSnapshot(
+  listId: number,
+  key: string,
+  conn: ShareConnection,
+  snapshot: SharePayload
+): void {
+  const state = db.getShoppingListSyncState(listId);
+  // The list may have been deleted or re-bound to a different share since
+  // this connection was opened; a late frame must not cross shares.
+  if (!state || state.shareKey !== key) return;
+  // Drop stale replays (reordered or replayed during reconnects).
   if (snapshot.version < state.syncedVersion) return;
 
-  const local = db.getShoppingSyncRecords();
+  const local = db.getShoppingSyncRecords(listId);
   const remote = db.normalizeShoppingItems(snapshot.items as unknown as db.SyncShoppingItem[]);
   const merged = db.mergeRecords(local, remote, db.shoppingRecordKey);
   const mergedFp = db.shoppingFingerprint(merged);
+  const { name, localWins: localNameWins } = resolveListName(snapshot, state);
+  const remoteNameWins = !localNameWins && name !== state.name;
 
-  const needPush = mergedFp !== db.shoppingFingerprint(remote);
-  if (mergedFp !== db.shoppingFingerprint(local)) {
-    db.applySyncedShoppingItems(merged, snapshot.version, !needPush);
-    emitRemoteUpdate({ type: 'shopping' });
+  const needPush = mergedFp !== db.shoppingFingerprint(remote) || localNameWins;
+  if (mergedFp !== db.shoppingFingerprint(local) || remoteNameWins) {
+    db.applySyncedShoppingItems(listId, remoteNameWins ? name : '', merged, snapshot.version, !needPush);
+    emitRemoteUpdate({ type: 'shopping', listId });
   } else {
-    db.adoptShoppingSync(snapshot.version, !needPush);
+    db.adoptShoppingListSync(listId, snapshot.version, !needPush);
   }
-  if (needPush) conn.send('Shopping', toRemoteItems(merged), state.updatedAt);
+  if (needPush) conn.send(name, toRemoteItems(merged), state.updatedAt);
 }
 
 /** Bumped at the start of every refresh so an overlapping older call can
@@ -122,12 +129,14 @@ export async function refreshSyncConnections(): Promise<void> {
     conn.connect();
   }
 
-  const shoppingKey = db.getSetting(db.SHOPPING_SHARE_KEY_SETTING);
-  if (shoppingKey) {
-    const conn: ShareConnection = new ShareConnection(shoppingKey, (snapshot) =>
-      handleShoppingSnapshot(shoppingKey, conn, snapshot)
+  for (const list of db.getShoppingLists()) {
+    if (!list.shareKey) continue;
+    const listId = list.id;
+    const key = list.shareKey;
+    const conn: ShareConnection = new ShareConnection(key, (snapshot) =>
+      handleShoppingSnapshot(listId, key, conn, snapshot)
     );
-    connections.push({ kind: 'shopping', conn });
+    connections.push({ kind: 'shopping', listId, conn });
     conn.connect();
   }
 }
@@ -142,17 +151,13 @@ export function pushTodoListIfShared(listId: number): void {
   managed?.conn.send(state.name, toRemoteItems(db.getTaskSyncRecords(listId)), state.updatedAt);
 }
 
-/** Call after any local edit to the shopping list, so - if it's shared - the
+/** Call after any local edit to a shopping list, so - if it's shared - the
  *  change goes out to peers immediately. */
-export function pushShoppingIfShared(): void {
-  const key = db.getSetting(db.SHOPPING_SHARE_KEY_SETTING);
-  if (!key) return;
-  const managed = connections.find((c) => c.kind === 'shopping');
-  managed?.conn.send(
-    'Shopping',
-    toRemoteItems(db.getShoppingSyncRecords()),
-    db.getShoppingSyncState().updatedAt
-  );
+export function pushShoppingListIfShared(listId: number): void {
+  const state = db.getShoppingListSyncState(listId);
+  if (!state?.shareKey) return;
+  const managed = connections.find((c) => c.kind === 'shopping' && c.listId === listId);
+  managed?.conn.send(state.name, toRemoteItems(db.getShoppingSyncRecords(listId)), state.updatedAt);
 }
 
 let started = false;

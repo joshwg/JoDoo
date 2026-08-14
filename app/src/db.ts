@@ -7,7 +7,7 @@ import {
   SyncShoppingItem,
   SyncTaskItem,
 } from './syncCore';
-import { DictionaryEntry, ShoppingItem, Task, TodoList } from './types';
+import { DictionaryEntry, ShoppingItem, ShoppingList, Task, TodoList } from './types';
 import { generateUuid } from './uuid';
 
 // The pure protocol pieces (item shapes, fingerprints, merge) live in
@@ -44,8 +44,18 @@ export function initDb(): void {
       position INTEGER NOT NULL DEFAULT 0,
       updated_at TEXT NOT NULL DEFAULT ''
     );
+    CREATE TABLE IF NOT EXISTS shopping_lists (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      position INTEGER NOT NULL DEFAULT 0,
+      share_key TEXT,
+      synced_version INTEGER NOT NULL DEFAULT 0,
+      dirty INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL DEFAULT ''
+    );
     CREATE TABLE IF NOT EXISTS shopping_items (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
+      list_id INTEGER REFERENCES shopping_lists(id) ON DELETE CASCADE,
       uuid TEXT,
       name TEXT NOT NULL,
       checked INTEGER NOT NULL DEFAULT 0,
@@ -77,6 +87,50 @@ export function initDb(): void {
   if (!shoppingCols.some((c) => c.name === 'amount')) {
     db.execSync('ALTER TABLE shopping_items ADD COLUMN amount TEXT');
   }
+  if (!shoppingCols.some((c) => c.name === 'list_id')) {
+    db.execSync(
+      'ALTER TABLE shopping_items ADD COLUMN list_id INTEGER REFERENCES shopping_lists(id) ON DELETE CASCADE'
+    );
+  }
+
+  // Migration: shopping used to be a single fixed list whose share binding
+  // and sync state lived in settings. Fold all of that into the first
+  // shopping_lists row; on a fresh install this same block just seeds the
+  // default list.
+  const shoppingListCount = db.getFirstSync<{ n: number }>(
+    'SELECT COUNT(*) AS n FROM shopping_lists'
+  );
+  if (!shoppingListCount || shoppingListCount.n === 0) {
+    db.withTransactionSync(() => {
+      const res = db.runSync(
+        'INSERT INTO shopping_lists (name, position, share_key, synced_version, dirty, updated_at) VALUES (?, 1, ?, ?, ?, ?)',
+        'Shopping',
+        getSetting(LEGACY_SHOPPING_SHARE_KEY_SETTING),
+        Number(getSetting(LEGACY_SHOPPING_SYNCED_VERSION_SETTING) ?? 0) || 0,
+        getSetting(LEGACY_SHOPPING_DIRTY_SETTING) === '1' ? 1 : 0,
+        getSetting(LEGACY_SHOPPING_UPDATED_AT_SETTING) ?? ''
+      );
+      const listId = Number(res.lastInsertRowId);
+      db.runSync('UPDATE shopping_items SET list_id = ? WHERE list_id IS NULL', listId);
+      db.runSync(
+        'UPDATE sync_deletions SET scope = ? WHERE scope = ?',
+        shoppingScope(listId),
+        LEGACY_SHOPPING_SCOPE
+      );
+      for (const key of [
+        LEGACY_SHOPPING_SHARE_KEY_SETTING,
+        LEGACY_SHOPPING_SYNCED_VERSION_SETTING,
+        LEGACY_SHOPPING_DIRTY_SETTING,
+        LEGACY_SHOPPING_UPDATED_AT_SETTING,
+      ]) {
+        deleteSetting(key);
+      }
+    });
+  }
+  // Safety net: items that somehow still lack a list join the oldest one.
+  db.runSync(
+    'UPDATE shopping_items SET list_id = (SELECT MIN(id) FROM shopping_lists) WHERE list_id IS NULL'
+  );
 
   // Start the user off with one list so the To Do section is never empty.
   const row = db.getFirstSync<{ n: number }>('SELECT COUNT(*) AS n FROM lists');
@@ -128,14 +182,23 @@ export function deleteSetting(key: string): void {
 // counter still orders snapshots; the per-list dirty flag and edit time now
 // arbitrate only the list *name*, which has no per-item timestamp.
 
-export const SHOPPING_SHARE_KEY_SETTING = 'shopping_share_key';
+// Legacy single-shopping-list keys, only referenced by the one-time
+// migration in initDb that folds them into the shopping_lists table.
+const LEGACY_SHOPPING_SHARE_KEY_SETTING = 'shopping_share_key';
+const LEGACY_SHOPPING_SYNCED_VERSION_SETTING = 'shopping_synced_version';
+const LEGACY_SHOPPING_DIRTY_SETTING = 'shopping_dirty';
+const LEGACY_SHOPPING_UPDATED_AT_SETTING = 'shopping_updated_at';
+const LEGACY_SHOPPING_SCOPE = 'shopping';
 
 /** Tombstone scope for a todo list's deletions. */
 function listScope(listId: number): string {
   return `list:${listId}`;
 }
 
-const SHOPPING_SCOPE = 'shopping';
+/** Tombstone scope for a shopping list's deletions. */
+function shoppingScope(listId: number): string {
+  return `shopping:${listId}`;
+}
 
 /** How long deletion tombstones are kept before being purged. A device that
  *  stays offline longer than this may resurrect items deleted by its peers. */
@@ -223,39 +286,6 @@ function markListOfTaskDirty(taskId: number): void {
     taskId
   );
 }
-
-const SHOPPING_SYNCED_VERSION_SETTING = 'shopping_synced_version';
-const SHOPPING_DIRTY_SETTING = 'shopping_dirty';
-const SHOPPING_UPDATED_AT_SETTING = 'shopping_updated_at';
-
-export function getShoppingSyncState(): SyncState {
-  return {
-    // `|| 0` also shields against a corrupted non-numeric setting (NaN).
-    syncedVersion: Number(getSetting(SHOPPING_SYNCED_VERSION_SETTING) ?? 0) || 0,
-    dirty: getSetting(SHOPPING_DIRTY_SETTING) === '1',
-    updatedAt: getSetting(SHOPPING_UPDATED_AT_SETTING) ?? '',
-  };
-}
-
-function markShoppingDirty(): void {
-  db.runSync(
-    'INSERT INTO settings (key, value) VALUES (?, ?), (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
-    SHOPPING_DIRTY_SETTING,
-    '1',
-    SHOPPING_UPDATED_AT_SETTING,
-    new Date().toISOString()
-  );
-}
-
-/** Records the shopping list's server binding right after creating the
- *  share: the server was seeded with our current items, so its version is
- *  adopted as clean - otherwise the first incoming snapshot would be
- *  arbitrated as a conflict against pre-share dirty state. */
-export function bindShoppingShare(version: number): void {
-  setSetting(SHOPPING_SYNCED_VERSION_SETTING, String(version));
-  setSetting(SHOPPING_DIRTY_SETTING, '0');
-}
-
 
 // ---------- Lists ----------
 
@@ -665,10 +695,147 @@ export function adoptListSync(listId: number, version: number, clearDirty: boole
   );
 }
 
-// ---------- Shopping ----------
+// ---------- Shopping lists ----------
+//
+// Shopping mirrors the todo side: multiple named lists, each independently
+// shareable, with items keyed by list_id. The functions below are the
+// shopping counterparts of the Lists/Tasks functions above.
+
+function toShoppingList(r: ListRow): ShoppingList {
+  return { id: r.id, name: r.name, position: r.position, shareKey: r.share_key };
+}
+
+export function getShoppingLists(): ShoppingList[] {
+  return db
+    .getAllSync<ListRow>('SELECT * FROM shopping_lists ORDER BY position, id')
+    .map(toShoppingList);
+}
+
+/** Shopping counterpart of {@link nextDefaultListName}: "Shopping N". */
+export function nextDefaultShoppingListName(): string {
+  const names = new Set(getShoppingLists().map((l) => l.name));
+  let n = 1;
+  while (names.has(`Shopping ${n}`)) n++;
+  return `Shopping ${n}`;
+}
+
+export function createShoppingList(): ShoppingList {
+  const name = nextDefaultShoppingListName();
+  const pos = db.getFirstSync<{ p: number }>(
+    'SELECT COALESCE(MAX(position), 0) + 1 AS p FROM shopping_lists'
+  )!.p;
+  const res = db.runSync('INSERT INTO shopping_lists (name, position) VALUES (?, ?)', name, pos);
+  return { id: Number(res.lastInsertRowId), name, position: pos, shareKey: null };
+}
+
+/** Shopping counterpart of {@link createJoinedList}. */
+export function createJoinedShoppingList(name: string, shareKey: string): ShoppingList {
+  const pos = db.getFirstSync<{ p: number }>(
+    'SELECT COALESCE(MAX(position), 0) + 1 AS p FROM shopping_lists'
+  )!.p;
+  const res = db.runSync(
+    'INSERT INTO shopping_lists (name, position, share_key) VALUES (?, ?, ?)',
+    name,
+    pos,
+    shareKey
+  );
+  return { id: Number(res.lastInsertRowId), name, position: pos, shareKey };
+}
+
+/** Shopping counterpart of {@link setListShareKey}. */
+export function setShoppingListShareKey(id: number, shareKey: string, syncedVersion: number): void {
+  db.runSync(
+    'UPDATE shopping_lists SET share_key = ?, synced_version = ?, dirty = 0 WHERE id = ?',
+    shareKey,
+    syncedVersion,
+    id
+  );
+}
+
+/** Shopping counterpart of {@link detachList}. */
+export function detachShoppingList(id: number): void {
+  db.runSync(
+    "UPDATE shopping_lists SET share_key = NULL, synced_version = 0, dirty = 0, updated_at = '' WHERE id = ?",
+    id
+  );
+  db.runSync('DELETE FROM sync_deletions WHERE scope = ?', shoppingScope(id));
+}
+
+export function renameShoppingList(id: number, name: string): void {
+  db.runSync('UPDATE shopping_lists SET name = ? WHERE id = ?', name.trim(), id);
+  markShoppingListDirty(id);
+}
+
+/** Persists a new list order (used by drag-to-reorder tabs in the UI). */
+export function reorderShoppingLists(orderedIds: number[]): void {
+  db.withTransactionSync(() => {
+    orderedIds.forEach((id, index) => {
+      db.runSync('UPDATE shopping_lists SET position = ? WHERE id = ?', index, id);
+    });
+  });
+}
+
+export function deleteShoppingList(id: number): void {
+  db.runSync('DELETE FROM shopping_items WHERE list_id = ?', id);
+  db.runSync('DELETE FROM sync_deletions WHERE scope = ?', shoppingScope(id));
+  db.runSync('DELETE FROM shopping_lists WHERE id = ?', id);
+}
+
+/** Shopping counterpart of {@link deleteAllLists}. */
+export function deleteAllShoppingLists(): ShoppingList {
+  db.withTransactionSync(() => {
+    db.runSync('DELETE FROM shopping_items');
+    db.runSync("DELETE FROM sync_deletions WHERE scope LIKE 'shopping:%'");
+    db.runSync('DELETE FROM shopping_lists');
+  });
+  return createShoppingList();
+}
+
+export function getShoppingListSyncState(listId: number): ListSyncState | null {
+  const row = db.getFirstSync<{
+    name: string;
+    share_key: string | null;
+    synced_version: number;
+    dirty: number;
+    updated_at: string;
+  }>(
+    'SELECT name, share_key, synced_version, dirty, updated_at FROM shopping_lists WHERE id = ?',
+    listId
+  );
+  if (!row) return null;
+  return {
+    name: row.name,
+    shareKey: row.share_key,
+    syncedVersion: row.synced_version,
+    dirty: row.dirty === 1,
+    updatedAt: row.updated_at,
+  };
+}
+
+/** Records "this shopping list's content just changed locally". */
+function markShoppingListDirty(listId: number): void {
+  db.runSync(
+    'UPDATE shopping_lists SET dirty = 1, updated_at = ? WHERE id = ?',
+    new Date().toISOString(),
+    listId
+  );
+}
+
+/** Like {@link markShoppingListDirty}, looked up via one of the list's
+ *  items; must be called while the item row still exists. */
+function markShoppingListOfItemDirty(itemId: number): void {
+  db.runSync(
+    'UPDATE shopping_lists SET dirty = 1, updated_at = ? WHERE id = (SELECT list_id FROM shopping_items WHERE id = ?)',
+    new Date().toISOString(),
+    itemId
+  );
+}
+
+// ---------- Shopping items ----------
 
 interface ShoppingRow {
   id: number;
+  list_id: number;
   uuid: string;
   name: string;
   checked: number;
@@ -676,11 +843,15 @@ interface ShoppingRow {
   amount: string | null;
 }
 
-export function getShoppingItems(): ShoppingItem[] {
+export function getShoppingItems(listId: number): ShoppingItem[] {
   return db
-    .getAllSync<ShoppingRow>('SELECT * FROM shopping_items ORDER BY checked, position, id')
+    .getAllSync<ShoppingRow>(
+      'SELECT * FROM shopping_items WHERE list_id = ? ORDER BY checked, position, id',
+      listId
+    )
     .map((r) => ({
       id: r.id,
+      listId: r.list_id,
       uuid: r.uuid,
       name: r.name,
       checked: r.checked === 1,
@@ -692,19 +863,21 @@ export function getShoppingItems(): ShoppingItem[] {
 /** Shopping item names are kept short enough to read on one line. */
 export const MAX_SHOPPING_ITEM_NAME_LENGTH = 32;
 
-export function addShoppingItem(name: string, amount: string | null = null): void {
+export function addShoppingItem(listId: number, name: string, amount: string | null = null): void {
   const pos = db.getFirstSync<{ p: number }>(
-    'SELECT COALESCE(MAX(position), 0) + 1 AS p FROM shopping_items'
+    'SELECT COALESCE(MAX(position), 0) + 1 AS p FROM shopping_items WHERE list_id = ?',
+    listId
   )!.p;
   db.runSync(
-    'INSERT INTO shopping_items (name, amount, uuid, position, updated_at) VALUES (?, ?, ?, ?, ?)',
+    'INSERT INTO shopping_items (list_id, name, amount, uuid, position, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
+    listId,
     name.trim().slice(0, MAX_SHOPPING_ITEM_NAME_LENGTH),
     amount && amount.trim() ? amount.trim() : null,
     generateUuid(),
     pos,
     new Date().toISOString()
   );
-  markShoppingDirty();
+  markShoppingListDirty(listId);
 }
 
 export function setShoppingChecked(id: number, checked: boolean): void {
@@ -714,7 +887,7 @@ export function setShoppingChecked(id: number, checked: boolean): void {
     new Date().toISOString(),
     id
   );
-  markShoppingDirty();
+  markShoppingListOfItemDirty(id);
 }
 
 /** Sets or clears (via null/empty) a shopping item's free-form amount. */
@@ -725,43 +898,47 @@ export function setShoppingAmount(id: number, amount: string | null): void {
     new Date().toISOString(),
     id
   );
-  markShoppingDirty();
+  markShoppingListOfItemDirty(id);
 }
 
-/** Tombstones shopping items about to be deleted, but only while the
- *  shopping list is shared (unshared lists never merge). */
-function tombstoneShoppingItems(ids: number[]): void {
-  if (!getSetting(SHOPPING_SHARE_KEY_SETTING)) return;
+/** Tombstones shopping items about to be deleted, but only when their list
+ *  is shared (unshared lists never merge). Must run while the rows exist. */
+function tombstoneShoppingItemsIfShared(ids: number[]): void {
   for (const id of ids) {
-    const row = db.getFirstSync<{ uuid: string }>(
-      'SELECT uuid FROM shopping_items WHERE id = ?',
+    const row = db.getFirstSync<{ uuid: string; list_id: number; share_key: string | null }>(
+      'SELECT i.uuid, i.list_id, l.share_key FROM shopping_items i JOIN shopping_lists l ON l.id = i.list_id WHERE i.id = ?',
       id
     );
-    addTombstone(SHOPPING_SCOPE, row?.uuid);
+    if (row?.share_key) addTombstone(shoppingScope(row.list_id), row.uuid);
   }
 }
 
 export function deleteShoppingItem(id: number): void {
-  tombstoneShoppingItems([id]);
+  // Mark first: the list lookup needs the item row to still exist.
+  markShoppingListOfItemDirty(id);
+  tombstoneShoppingItemsIfShared([id]);
   db.runSync('DELETE FROM shopping_items WHERE id = ?', id);
-  markShoppingDirty();
 }
 
-export function clearCheckedShoppingItems(): void {
-  const checked = db.getAllSync<{ id: number }>('SELECT id FROM shopping_items WHERE checked = 1');
-  tombstoneShoppingItems(checked.map((r) => r.id));
-  db.runSync('DELETE FROM shopping_items WHERE checked = 1');
-  markShoppingDirty();
+export function clearCheckedShoppingItems(listId: number): void {
+  const checked = db.getAllSync<{ id: number }>(
+    'SELECT id FROM shopping_items WHERE list_id = ? AND checked = 1',
+    listId
+  );
+  tombstoneShoppingItemsIfShared(checked.map((r) => r.id));
+  db.runSync('DELETE FROM shopping_items WHERE list_id = ? AND checked = 1', listId);
+  markShoppingListDirty(listId);
 }
 
 // ---------- Sync: shopping list snapshot export/apply ----------
 
 /** Shopping counterpart of {@link getTaskSyncRecords}. */
-export function getShoppingSyncRecords(): SyncShoppingItem[] {
+export function getShoppingSyncRecords(listId: number): SyncShoppingItem[] {
   // Canonical (position, uuid) order, mirroring getTaskSyncRecords.
   const live: SyncShoppingItem[] = db
     .getAllSync<ShoppingRow & { updated_at: string }>(
-      'SELECT * FROM shopping_items ORDER BY position, uuid'
+      'SELECT * FROM shopping_items WHERE list_id = ? ORDER BY position, uuid',
+      listId
     )
     .map((r) => ({
       uuid: r.uuid,
@@ -771,7 +948,7 @@ export function getShoppingSyncRecords(): SyncShoppingItem[] {
       updatedAt: r.updated_at,
       amount: r.amount,
     }));
-  const tombstones: SyncShoppingItem[] = getTombstones(SHOPPING_SCOPE).map((t) => ({
+  const tombstones: SyncShoppingItem[] = getTombstones(shoppingScope(listId)).map((t) => ({
     uuid: t.uuid,
     name: '',
     checked: false,
@@ -783,19 +960,27 @@ export function getShoppingSyncRecords(): SyncShoppingItem[] {
   return [...live, ...tombstones];
 }
 
-/** Same reconciliation strategy as {@link applySyncedTasks}, for the single
- *  shopping list. */
+/** Same reconciliation strategy as {@link applySyncedTasks}, for one
+ *  shopping list. An empty `name` keeps the current list name. */
 export function applySyncedShoppingItems(
+  listId: number,
+  name: string,
   items: SyncShoppingItem[],
   version: number,
   clearDirty = true
 ): void {
+  const scope = shoppingScope(listId);
   db.withTransactionSync(() => {
-    const current = Number(getSetting(SHOPPING_SYNCED_VERSION_SETTING) ?? 0);
-    setSetting(SHOPPING_SYNCED_VERSION_SETTING, String(Math.max(current, version)));
-    if (clearDirty) setSetting(SHOPPING_DIRTY_SETTING, '0');
+    db.runSync(
+      "UPDATE shopping_lists SET name = COALESCE(NULLIF(?, ''), name), synced_version = MAX(synced_version, ?), dirty = CASE WHEN ? THEN 0 ELSE dirty END WHERE id = ?",
+      name,
+      version,
+      clearDirty ? 1 : 0,
+      listId
+    );
     const existing = db.getAllSync<{ id: number; uuid: string }>(
-      'SELECT id, uuid FROM shopping_items'
+      'SELECT id, uuid FROM shopping_items WHERE list_id = ?',
+      listId
     );
     const byUuid = new Map(existing.map((e) => [e.uuid, e.id]));
     const seen = new Set<string>();
@@ -806,7 +991,7 @@ export function applySyncedShoppingItems(
         if (existingId != null) db.runSync('DELETE FROM shopping_items WHERE id = ?', existingId);
         db.runSync(
           'INSERT INTO sync_deletions (scope, uuid, deleted_at) VALUES (?, ?, ?) ON CONFLICT(scope, uuid) DO UPDATE SET deleted_at = excluded.deleted_at',
-          SHOPPING_SCOPE,
+          scope,
           item.uuid,
           item.updatedAt || new Date().toISOString()
         );
@@ -824,7 +1009,8 @@ export function applySyncedShoppingItems(
         );
       } else {
         db.runSync(
-          'INSERT INTO shopping_items (name, uuid, checked, position, updated_at, amount) VALUES (?, ?, ?, ?, ?, ?)',
+          'INSERT INTO shopping_items (list_id, name, uuid, checked, position, updated_at, amount) VALUES (?, ?, ?, ?, ?, ?, ?)',
+          listId,
           item.name,
           item.uuid,
           item.checked ? 1 : 0,
@@ -833,11 +1019,7 @@ export function applySyncedShoppingItems(
           item.amount ?? null
         );
       }
-      db.runSync(
-        'DELETE FROM sync_deletions WHERE scope = ? AND uuid = ?',
-        SHOPPING_SCOPE,
-        item.uuid
-      );
+      db.runSync('DELETE FROM sync_deletions WHERE scope = ? AND uuid = ?', scope, item.uuid);
     }
     for (const e of existing) {
       if (!seen.has(e.uuid)) {
@@ -848,42 +1030,13 @@ export function applySyncedShoppingItems(
 }
 
 /** Shopping counterpart of {@link adoptListSync}. */
-export function adoptShoppingSync(version: number, clearDirty: boolean): void {
-  const current = Number(getSetting(SHOPPING_SYNCED_VERSION_SETTING) ?? 0);
-  setSetting(SHOPPING_SYNCED_VERSION_SETTING, String(Math.max(current, version)));
-  if (clearDirty) setSetting(SHOPPING_DIRTY_SETTING, '0');
-}
-
-/** Deletes every local shopping item; used right before adopting someone
- *  else's shared shopping list via its key. Resets the sync state (including
- *  tombstones from the previous binding) so the new share's first snapshot
- *  always applies cleanly. */
-export function clearAllShoppingItems(): void {
-  db.runSync('DELETE FROM shopping_items');
-  db.runSync('DELETE FROM sync_deletions WHERE scope = ?', SHOPPING_SCOPE);
-  deleteSetting(SHOPPING_SYNCED_VERSION_SETTING);
-  deleteSetting(SHOPPING_DIRTY_SETTING);
-  deleteSetting(SHOPPING_UPDATED_AT_SETTING);
-}
-
-/** Shopping counterpart of {@link detachList}: keeps the items on this
- *  device but stops syncing them; the share and other users are untouched. */
-export function detachShoppingShare(): void {
-  deleteSetting(SHOPPING_SHARE_KEY_SETTING);
-  db.runSync('DELETE FROM sync_deletions WHERE scope = ?', SHOPPING_SCOPE);
-  deleteSetting(SHOPPING_SYNCED_VERSION_SETTING);
-  deleteSetting(SHOPPING_DIRTY_SETTING);
-  deleteSetting(SHOPPING_UPDATED_AT_SETTING);
-}
-
-/** Device-local reset of the whole shopping side: detaches from any share,
- *  deletes every item and all sync state, and restores the default
- *  dictionary. Detaching comes first so nothing is tombstoned or pushed -
- *  the share and every other user's copy stay exactly as they are. */
-export function resetShoppingList(): void {
-  deleteSetting(SHOPPING_SHARE_KEY_SETTING);
-  clearAllShoppingItems();
-  resetDictionary();
+export function adoptShoppingListSync(listId: number, version: number, clearDirty: boolean): void {
+  db.runSync(
+    'UPDATE shopping_lists SET synced_version = MAX(synced_version, ?), dirty = CASE WHEN ? THEN 0 ELSE dirty END WHERE id = ?',
+    version,
+    clearDirty ? 1 : 0,
+    listId
+  );
 }
 
 

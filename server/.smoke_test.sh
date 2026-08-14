@@ -33,6 +33,13 @@ echo "--- get share ---"
 curl -s -H "Authorization: Bearer $JODOO_SERVER_KEY" http://localhost:8099/api/lists/$KEY
 echo
 
+echo "--- join page (unauthenticated, should be 200 and contain the deep link) ---"
+JOIN_PAGE=$(curl -s http://localhost:8099/join/$KEY)
+echo "$JOIN_PAGE" | grep -q "jodoo://join?key=$KEY" && echo "deep link ok" || { echo "MISSING DEEP LINK"; exit 1; }
+
+echo "--- join page with malformed key (should be 404) ---"
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8099/join/NOT-A-VALID-KEY
+
 echo "--- get nonexistent share ---"
 curl -s -o /dev/null -w "%{http_code}\n" -H "Authorization: Bearer $JODOO_SERVER_KEY" http://localhost:8099/api/lists/doesnotexist00000000
 

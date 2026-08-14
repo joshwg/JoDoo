@@ -16,12 +16,14 @@ import {
 } from 'react-native';
 import * as db from '../db';
 import { subscribeRemoteUpdate } from '../remoteUpdates';
-import { createShare, fetchShare, shareExists } from '../syncClient';
+import { joinShareByKey } from '../joinShare';
+import { createShare, shareExists } from '../syncClient';
 import { pushTodoListIfShared, refreshSyncConnections } from '../syncManager';
 import { headerFontSize, useTextSettings } from '../textSettings';
 import { Task, TodoList } from '../types';
 import EnterKeyModal from './EnterKeyModal';
 import FontSettingsModal from './FontSettingsModal';
+import JoinScanModal from './JoinScanModal';
 import ListTab from './ListTab';
 import ServerSettingsModal from './ServerSettingsModal';
 import ShareKeyModal from './ShareKeyModal';
@@ -38,6 +40,7 @@ export default function TodoSection() {
   const [renameText, setRenameText] = useState('');
   const [addMenuVisible, setAddMenuVisible] = useState(false);
   const [joinVisible, setJoinVisible] = useState(false);
+  const [scanVisible, setScanVisible] = useState(false);
   const [settingsMenuOpen, setSettingsMenuOpen] = useState(false);
   const [serverSettingsVisible, setServerSettingsVisible] = useState(false);
   const [fontSettingsVisible, setFontSettingsVisible] = useState(false);
@@ -430,6 +433,20 @@ export default function TodoSection() {
     setJoinVisible(true);
   };
 
+  const startScanList = () => {
+    setAddMenuVisible(false);
+    setScanVisible(true);
+  };
+
+  const joinFromScan = async (key: string) => {
+    setScanVisible(false);
+    try {
+      await joinSharedList(key);
+    } catch (err) {
+      Alert.alert('Could not join list', err instanceof Error ? err.message : String(err));
+    }
+  };
+
   const confirmDeleteAllLists = () => {
     setAddMenuVisible(false);
     Alert.alert(
@@ -451,31 +468,17 @@ export default function TodoSection() {
   };
 
   const joinSharedList = async (key: string) => {
-    const snapshot = await fetchShare(key);
-    if (snapshot.kind !== 'todo') {
-      throw new Error('That key belongs to a shopping list, not a todo list.');
-    }
-    // Rejoining a share this device already has (e.g. retrying after a
-    // partial failure) must neither create a duplicate list nor force-apply
-    // the snapshot over local edits the live sync path hasn't pushed yet -
-    // the reopened connection arbitrates content properly.
-    const existing = db.getLists().find((l) => l.shareKey === key);
-    let targetId: number;
-    if (existing) {
-      targetId = existing.id;
+    // A shopping key entered here still joins - it just lands in the
+    // Shopping section instead of being rejected.
+    const result = await joinShareByKey(key);
+    if (result.kind === 'todo') {
+      refreshLists(result.listId);
     } else {
-      const name = snapshot.name || 'Shared List';
-      const created = db.createJoinedList(name, key);
-      db.applySyncedTasks(
-        created.id,
-        name,
-        snapshot.items as unknown as db.SyncTaskItem[],
-        snapshot.version
+      Alert.alert(
+        'Shopping list joined',
+        'That key belongs to a shared shopping list, so it was added to your Shopping section.'
       );
-      targetId = created.id;
     }
-    refreshLists(targetId);
-    await refreshSyncConnections();
     setJoinVisible(false);
   };
 
@@ -849,6 +852,10 @@ export default function TodoSection() {
               <Text style={styles.menuText}>Join Shared List</Text>
             </Pressable>
             <View style={styles.menuDivider} />
+            <Pressable style={styles.menuItem} onPress={startScanList}>
+              <Text style={styles.menuText}>Scan QR Code</Text>
+            </Pressable>
+            <View style={styles.menuDivider} />
             <Pressable style={styles.menuItem} onPress={confirmDeleteAllLists}>
               <Text style={styles.menuDangerText}>Delete All Lists</Text>
             </Pressable>
@@ -859,9 +866,15 @@ export default function TodoSection() {
       <EnterKeyModal
         visible={joinVisible}
         title="Join Shared List"
-        body="Enter the share key someone gave you to add their todo list here."
+        body="Enter the share key someone gave you to add their list here."
         onCancel={() => setJoinVisible(false)}
         onSubmit={joinSharedList}
+      />
+
+      <JoinScanModal
+        visible={scanVisible}
+        onCancel={() => setScanVisible(false)}
+        onScanned={(key) => void joinFromScan(key)}
       />
 
       <ShareKeyModal

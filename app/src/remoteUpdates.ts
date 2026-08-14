@@ -5,7 +5,9 @@
  * server" (see syncManager.ts) so applying a remote update never triggers a
  * push right back to the server.
  */
-export type RemoteUpdateTarget = { type: 'todo'; listId: number } | { type: 'shopping' };
+export type RemoteUpdateTarget =
+  | { type: 'todo'; listId: number }
+  | { type: 'shopping'; listId: number };
 
 type Listener = (target: RemoteUpdateTarget) => void;
 

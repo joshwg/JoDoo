@@ -1,8 +1,11 @@
 import { StatusBar } from 'expo-status-bar';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { PanResponder, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Alert, Linking, PanResponder, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import * as db from './src/db';
+import { joinShareByKey } from './src/joinShare';
+import { getServerConfig, normalizeBaseUrl } from './src/serverConfig';
+import { parseJoinUrl } from './src/shareLinks';
 import { startSyncManager } from './src/syncManager';
 import ShoppingSection from './src/components/ShoppingSection';
 import TodoSection from './src/components/TodoSection';
@@ -19,6 +22,60 @@ export default function App() {
   // while the app was closed).
   useEffect(() => startSyncManager(), []);
   const [section, setSection] = useState<Section>('todo');
+
+  // Share links: opening jodoo://join?key=... or https://<server>/join/<key>
+  // (from a tapped link or a QR code scanned outside the app) lands here.
+  // The link never carries the server access key, so joining only works once
+  // the recipient has configured the server; otherwise we explain what's
+  // missing instead of failing cryptically.
+  useEffect(() => {
+    const joinFromLink = async (key: string) => {
+      try {
+        const result = await joinShareByKey(key);
+        // Show the section the list actually landed in; the section itself
+        // refreshes via the join's remote-update event.
+        setSection(result.kind);
+      } catch (err) {
+        Alert.alert('Could not join list', err instanceof Error ? err.message : String(err));
+      }
+    };
+
+    const handleUrl = async (url: string | null) => {
+      if (!url) return;
+      const parsed = parseJoinUrl(url);
+      if (!parsed) return;
+      const config = await getServerConfig();
+      if (!config) {
+        Alert.alert(
+          'Connect to the server first',
+          'This link is an invitation to a shared Jodoo list, but no sync server is set up yet. ' +
+            `Open ⚙ → Server Settings and enter the server URL${
+              parsed.server ? ` (${parsed.server})` : ''
+            } and the server key from the person who shared the list, then open the link again.`
+        );
+        return;
+      }
+      const mismatch =
+        parsed.server != null &&
+        normalizeBaseUrl(parsed.server).toLowerCase() !==
+          normalizeBaseUrl(config.baseUrl).toLowerCase();
+      Alert.alert(
+        'Join shared list?',
+        'Add this shared list to your Jodoo?' +
+          (mismatch
+            ? `\n\nNote: the link points at ${parsed.server}, but this app is connected to ${config.baseUrl}. The key may not exist there.`
+            : ''),
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Join', onPress: () => void joinFromLink(parsed.key) },
+        ]
+      );
+    };
+
+    Linking.getInitialURL().then((url) => void handleUrl(url));
+    const sub = Linking.addEventListener('url', (event) => void handleUrl(event.url));
+    return () => sub.remove();
+  }, []);
 
   // A two-finger horizontal swipe toggles between the To Do and Shopping sections.
   const panResponder = useRef(
