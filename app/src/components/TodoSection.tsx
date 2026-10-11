@@ -27,6 +27,7 @@ import JoinScanModal from './JoinScanModal';
 import ListTab from './ListTab';
 import ServerSettingsModal from './ServerSettingsModal';
 import ShareKeyModal from './ShareKeyModal';
+import ItemMenuModal from './ItemMenuModal';
 import TaskCard from './TaskCard';
 import TaskEditorModal from './TaskEditorModal';
 
@@ -48,6 +49,8 @@ export default function TodoSection() {
   const [shareKeyShown, setShareKeyShown] = useState<string | null>(null);
   const { fontFamily, fontSize, scale } = useTextSettings();
   const [draggingTaskId, setDraggingTaskId] = useState<number | null>(null);
+  // Task whose action menu is open (long-press on the title).
+  const [moveTask, setMoveTask] = useState<Task | null>(null);
   const [dragOverListId, setDragOverListId] = useState<number | null>(null);
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
   const [draggingListId, setDraggingListId] = useState<number | null>(null);
@@ -307,6 +310,25 @@ export default function TodoSection() {
     },
     [refreshTasks, stopAutoScroll]
   );
+
+  // Menu-driven move (long-press a task's title); same effect as dropping
+  // the card on another list's tab.
+  const moveTaskTo = (task: Task, targetListId: number) => {
+    setMoveTask(null);
+    if (targetListId === task.listId) return;
+    db.moveTaskToList(task.id, targetListId);
+    refreshTasks(activeListId);
+    pushTodoListIfShared(task.listId);
+    pushTodoListIfShared(targetListId);
+  };
+
+  // Like a move, but the source list keeps its copy.
+  const copyTaskTo = (task: Task, targetListId: number) => {
+    setMoveTask(null);
+    if (targetListId === task.listId) return;
+    db.copyTaskToList(task.id, targetListId);
+    pushTodoListIfShared(targetListId);
+  };
 
   // ----- drag-and-drop: reorder the lists (tabs) themselves -----
 
@@ -573,6 +595,14 @@ export default function TodoSection() {
     );
   };
 
+  /** Duplicates the list into a new local, unshared list - a private copy
+   *  other members of a share cannot change - and switches to it. */
+  const copyList = (list: TodoList) => {
+    setRenamingList(null);
+    const copy = db.copyList(list.id);
+    refreshLists(copy.id);
+  };
+
   const confirmDeleteList = (list: TodoList) => {
     setRenamingList(null);
     Alert.alert('Delete list', `Delete "${list.name}" and all of its tasks?`, [
@@ -665,7 +695,12 @@ export default function TodoSection() {
               { fontFamily, fontSize: 14 * scale },
             ]}
             onSelect={() => setActiveListId(list.id)}
-            onRename={() => openRename(list)}
+            onRename={() => {
+              // Long-pressing any tab targets that list: make it active and
+              // open the same rename/share/copy/delete dialog.
+              setActiveListId(list.id);
+              openRename(list);
+            }}
             onDragStart={handleListDragStart}
             onDragMove={handleListDragMove}
             onDragEnd={handleListDragEnd}
@@ -755,6 +790,7 @@ export default function TodoSection() {
                   onDragStart={handleDragStart}
                   onDragMove={handleDragMove}
                   onDragEnd={handleDragEnd}
+                  onMoveRequest={(t) => setMoveTask(t)}
                 />
               </View>
             )}
@@ -774,6 +810,44 @@ export default function TodoSection() {
           setEditorVisible(false);
           setEditingTask(null);
         }}
+      />
+
+      {/* Task action menu, opened by long-pressing a task's title. */}
+      <ItemMenuModal
+        visible={moveTask != null}
+        title={moveTask?.title ?? ''}
+        actions={[
+          {
+            label: moveTask?.done ? 'Un-cross off' : 'Cross off',
+            onPress: () => {
+              if (!moveTask) return;
+              setMoveTask(null);
+              toggleDone(moveTask);
+            },
+          },
+          {
+            label: 'Edit',
+            onPress: () => {
+              if (!moveTask) return;
+              setEditingTask(moveTask);
+              setMoveTask(null);
+              setEditorVisible(true);
+            },
+          },
+          {
+            label: 'Delete',
+            destructive: true,
+            onPress: () => {
+              if (!moveTask) return;
+              setMoveTask(null);
+              deleteTask(moveTask); // confirms via its own alert
+            },
+          },
+        ]}
+        lists={lists.filter((l) => l.id !== moveTask?.listId)}
+        onPick={(targetId) => moveTask && moveTaskTo(moveTask, targetId)}
+        onPickCopy={(targetId) => moveTask && copyTaskTo(moveTask, targetId)}
+        onClose={() => setMoveTask(null)}
       />
 
       {/* Rename / delete list dialog (opened by long-pressing a tab). */}
@@ -822,6 +896,13 @@ export default function TodoSection() {
                     <Text style={styles.shareText}>Unshare</Text>
                   </Pressable>
                 )}
+                <Pressable
+                  onPress={() => renamingList && copyList(renamingList)}
+                  style={styles.renameButton}
+                  disabled={shareBusy}
+                >
+                  <Text style={styles.shareText}>Copy</Text>
+                </Pressable>
                 <View style={styles.renameSpacer} />
                 <Pressable onPress={() => setRenamingList(null)} style={styles.renameButton}>
                   <Text style={styles.cancelText}>Cancel</Text>
@@ -1097,6 +1178,7 @@ const styles = StyleSheet.create({
   },
   renameActions: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     alignItems: 'center',
     marginTop: 12,
   },

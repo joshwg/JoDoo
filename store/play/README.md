@@ -25,10 +25,9 @@ step.
 
 Drop new captures in `phone/`, then:
 
-```
-wsl -e bash -lc '~/.venvs/imaging/bin/python /path/to/pad_screenshots.py \
-    ~/projects/Jodoo/store/play/screenshots/phone \
-    ~/projects/Jodoo/store/play/screenshots/phone-play-ready'
+```bash
+cd ~/projects/Jodoo/store/play
+~/.venvs/imaging/bin/python pad_screenshots.py screenshots/phone screenshots/phone-play-ready
 ```
 
 The script scales each image to fit 1080x1920 and pads the sides by replicating
@@ -76,9 +75,9 @@ python3 -m venv ~/.venvs/imaging && ~/.venvs/imaging/bin/pip install Pillow
 
 ### Regenerating the graphics
 
-```
-wsl -e bash -lc 'cd ~/projects/Jodoo/store/play && \
-    ~/.venvs/imaging/bin/python make_graphics.py ~/projects/Jodoo/app/assets graphics'
+```bash
+cd ~/projects/Jodoo/store/play
+~/.venvs/imaging/bin/python make_graphics.py ../../app/assets graphics
 ```
 
 `make_graphics.py` samples the brand colours straight out of `icon.png`
@@ -92,8 +91,8 @@ the graphic's backdrop and reads as a stray wedge rather than an app tile.
 
 ## Checking a file before upload
 
-```
-wsl -e bash -lc 'cd /path/to/store/play && file screenshots/phone/*.png'
+```bash
+file screenshots/phone/*.png
 ```
 
 `identify` (ImageMagick) gives exact dimensions if available.

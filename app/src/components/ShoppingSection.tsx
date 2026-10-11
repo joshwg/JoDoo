@@ -25,10 +25,62 @@ import { DictionaryEntry, ShoppingItem, ShoppingList } from '../types';
 import DictionaryModal from './DictionaryModal';
 import EnterKeyModal from './EnterKeyModal';
 import FontSettingsModal from './FontSettingsModal';
+import ItemMenuModal from './ItemMenuModal';
 import JoinScanModal from './JoinScanModal';
 import ListTab from './ListTab';
 import ServerSettingsModal from './ServerSettingsModal';
 import ShareKeyModal from './ShareKeyModal';
+
+/** The ☰ handle on a shopping item row. It claims the touch the moment it
+ *  is pressed (no long-press arming), so dragging an item onto another
+ *  list's tab never fumbles. Shopping items have no manual reorder, so
+ *  moving between lists is the handle's only job. Callbacks are routed
+ *  through refs because the PanResponder is created once per row. */
+function ItemDragHandle({
+  item,
+  scale,
+  onDragStart,
+  onDragMove,
+  onDragEnd,
+}: {
+  item: ShoppingItem;
+  scale: number;
+  onDragStart: (item: ShoppingItem) => void;
+  onDragMove: (pageX: number, pageY: number) => void;
+  onDragEnd: (item: ShoppingItem) => void;
+}) {
+  const itemRef = useRef(item);
+  itemRef.current = item;
+  const onDragStartRef = useRef(onDragStart);
+  onDragStartRef.current = onDragStart;
+  const onDragMoveRef = useRef(onDragMove);
+  onDragMoveRef.current = onDragMove;
+  const onDragEndRef = useRef(onDragEnd);
+  onDragEndRef.current = onDragEnd;
+  const pan = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => true,
+      onMoveShouldSetPanResponder: () => true,
+      // Never let the list scroll (or any ancestor) steal an active drag.
+      onPanResponderTerminationRequest: () => false,
+      onPanResponderGrant: () => onDragStartRef.current(itemRef.current),
+      onPanResponderMove: (evt) =>
+        onDragMoveRef.current(evt.nativeEvent.pageX, evt.nativeEvent.pageY),
+      onPanResponderRelease: () => onDragEndRef.current(itemRef.current),
+      onPanResponderTerminate: () => onDragEndRef.current(itemRef.current),
+    })
+  ).current;
+  return (
+    <View
+      {...pan.panHandlers}
+      style={{ paddingLeft: 6 * scale, paddingVertical: 2 * scale }}
+      hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+      accessibilityLabel="Drag to move item to another list"
+    >
+      <Text style={[styles.dragHandleIcon, { fontSize: 16 * scale }]}>☰</Text>
+    </View>
+  );
+}
 
 export default function ShoppingSection() {
   const [lists, setLists] = useState<ShoppingList[]>([]);
@@ -49,6 +101,7 @@ export default function ShoppingSection() {
   const [shareKeyShown, setShareKeyShown] = useState<string | null>(null);
   const [shareBusy, setShareBusy] = useState(false);
   const [editingAmountItem, setEditingAmountItem] = useState<ShoppingItem | null>(null);
+  const [nameText, setNameText] = useState('');
   const [amountText, setAmountText] = useState('');
   const [draggingListId, setDraggingListId] = useState<number | null>(null);
   const [dragOverListId, setDragOverListId] = useState<number | null>(null);
@@ -193,6 +246,69 @@ export default function ShoppingSection() {
     }
     setDragOverListId(overId);
   }, [tabRectsRef]);
+
+  // ----- item move: long-press an item, pick the target list from a menu -----
+
+  // Item whose "Move to list" picker is open.
+  const [moveItem, setMoveItem] = useState<ShoppingItem | null>(null);
+
+  const moveItemTo = (item: ShoppingItem, targetListId: number) => {
+    setMoveItem(null);
+    if (targetListId === item.listId) return;
+    db.moveShoppingItemToList(item.id, targetListId);
+    refreshItems(activeListIdRef.current);
+    pushShoppingListIfShared(item.listId);
+    pushShoppingListIfShared(targetListId);
+  };
+
+  // Like a move, but the source list keeps its copy.
+  const copyItemTo = (item: ShoppingItem, targetListId: number) => {
+    setMoveItem(null);
+    if (targetListId === item.listId) return;
+    db.copyShoppingItemToList(item.id, targetListId);
+    pushShoppingListIfShared(targetListId);
+  };
+
+  // ----- handle-driven item drag: drop on another list's tab to move -----
+  // Plain functions, not useCallbacks: ItemDragHandle routes its PanResponder
+  // callbacks through refs, so these never go stale.
+
+  const [draggingItemId, setDraggingItemId] = useState<number | null>(null);
+
+  const handleItemDragStart = (item: ShoppingItem) => {
+    measureTabs();
+    setDraggingItemId(item.id);
+    setDragOverListId(null);
+    startAutoScroll();
+  };
+
+  const handleItemDragMove = (pageX: number, pageY: number) => {
+    dragPageRef.current = { x: pageX, y: pageY };
+    // Unlike tab reordering, which only cares about X, an item drag starts
+    // far below the tab strip - so the finger must really be on a tab.
+    let overId: number | null = null;
+    for (const [listId, rect] of tabRectsRef) {
+      if (
+        pageX >= rect.x &&
+        pageX <= rect.x + rect.width &&
+        pageY >= rect.y &&
+        pageY <= rect.y + rect.height
+      ) {
+        overId = listId;
+        break;
+      }
+    }
+    setDragOverListId(overId);
+  };
+
+  const handleItemDragEnd = (item: ShoppingItem) => {
+    stopAutoScroll();
+    dragPageRef.current = null;
+    const overId = dragOverListIdRef.current;
+    setDraggingItemId(null);
+    setDragOverListId(null);
+    if (overId != null) moveItemTo(item, overId);
+  };
 
   const handleListDragEnd = useCallback(
     (list: ShoppingList) => {
@@ -435,6 +551,14 @@ export default function ShoppingSection() {
     );
   };
 
+  /** Duplicates the list into a new local, unshared list - a private copy
+   *  other members of a share cannot change - and switches to it. */
+  const copyList = (list: ShoppingList) => {
+    setRenamingList(null);
+    const copy = db.copyShoppingList(list.id);
+    refreshLists(copy.id);
+  };
+
   const confirmDeleteList = (list: ShoppingList) => {
     setRenamingList(null);
     Alert.alert('Delete list', `Delete "${list.name}" and all of its items?`, [
@@ -479,24 +603,22 @@ export default function ShoppingSection() {
 
   const openAmountEditor = (item: ShoppingItem) => {
     setEditingAmountItem(item);
+    setNameText(item.name);
     setAmountText(item.amount ?? '');
   };
 
   const commitAmount = () => {
     if (!editingAmountItem) return;
-    db.setShoppingAmount(editingAmountItem.id, amountText);
+    // An emptied name keeps the old one - deleting is a separate action.
+    const name = nameText.trim() || editingAmountItem.name;
+    db.updateShoppingItem(editingAmountItem.id, name, amountText.trim() || null);
     setEditingAmountItem(null);
     refreshItems(activeListId);
     pushShoppingListIfShared(editingAmountItem.listId);
   };
 
-  const clearAmount = () => {
-    if (!editingAmountItem) return;
-    db.setShoppingAmount(editingAmountItem.id, null);
-    setEditingAmountItem(null);
-    refreshItems(activeListId);
-    pushShoppingListIfShared(editingAmountItem.listId);
-  };
+  // Clears the amount field only; nothing is saved until Save.
+  const clearAmount = () => setAmountText('');
 
   const hasChecked = items.some((i) => i.checked);
 
@@ -530,6 +652,7 @@ export default function ShoppingSection() {
             style={[
               styles.tab,
               list.id === activeListId && styles.tabActive,
+              draggingItemId != null && list.id !== activeListId && styles.tabDropTarget,
               dragOverListId === list.id && styles.tabDragOver,
             ]}
             textStyle={[
@@ -538,7 +661,12 @@ export default function ShoppingSection() {
               { fontFamily, fontSize: 14 * scale },
             ]}
             onSelect={() => setActiveListId(list.id)}
-            onRename={() => openRename(list)}
+            onRename={() => {
+              // Long-pressing any tab targets that list: make it active and
+              // open the same rename/share/copy/delete dialog.
+              setActiveListId(list.id);
+              openRename(list);
+            }}
             onDragStart={handleListDragStart}
             onDragMove={handleListDragMove}
             onDragEnd={handleListDragEnd}
@@ -618,8 +746,18 @@ export default function ShoppingSection() {
         <FlatList
           data={items}
           keyExtractor={(i) => String(i.id)}
+          // A handle drag must freeze list scrolling: on Android the native
+          // ScrollView intercepts moves below the JS responder layer, so
+          // onPanResponderTerminationRequest alone can't hold the gesture.
+          scrollEnabled={draggingItemId == null}
           renderItem={({ item }) => (
-            <View style={[styles.itemRow, { paddingHorizontal: 16 * scale, paddingVertical: 10 * scale }]}>
+            <View
+              style={[
+                styles.itemRow,
+                { paddingHorizontal: 16 * scale, paddingVertical: 10 * scale },
+                draggingItemId === item.id && styles.itemRowDragging,
+              ]}
+            >
               <Pressable
                 style={styles.itemMain}
                 onPress={() => {
@@ -627,6 +765,11 @@ export default function ShoppingSection() {
                   refreshItems(activeListId);
                   pushShoppingListIfShared(item.listId);
                 }}
+                // Long-press opens the action menu (cross off / delete /
+                // move to another list) - a menu is reliable where the old
+                // long-press-drag was easy to fumble.
+                onLongPress={() => setMoveItem(item)}
+                delayLongPress={300}
               >
                 <View
                   style={[
@@ -673,6 +816,13 @@ export default function ShoppingSection() {
               >
                 <Text style={[styles.delete, { fontSize: 16 * scale }]}>✕</Text>
               </Pressable>
+              <ItemDragHandle
+                item={item}
+                scale={scale}
+                onDragStart={handleItemDragStart}
+                onDragMove={handleItemDragMove}
+                onDragEnd={handleItemDragEnd}
+              />
             </View>
           )}
           ListEmptyComponent={
@@ -794,6 +944,13 @@ export default function ShoppingSection() {
                     <Text style={styles.shareText}>Unshare</Text>
                   </Pressable>
                 )}
+                <Pressable
+                  onPress={() => renamingList && copyList(renamingList)}
+                  style={styles.renameButton}
+                  disabled={shareBusy}
+                >
+                  <Text style={styles.shareText}>Copy</Text>
+                </Pressable>
                 <View style={styles.renameSpacer} />
                 <Pressable onPress={() => setRenamingList(null)} style={styles.renameButton}>
                   <Text style={styles.cancelText}>Cancel</Text>
@@ -845,15 +1002,23 @@ export default function ShoppingSection() {
         <KeyboardAvoidingView style={styles.amountBackdrop} behavior="padding">
           <View style={styles.amountSheet}>
             <Text style={[styles.amountHeading, { fontFamily, fontSize: headerFontSize(fontSize) }]}>
-              Amount
+              Edit item
             </Text>
+            <Text style={styles.amountLabel}>Name</Text>
+            <TextInput
+              style={[styles.amountInput, { fontFamily, fontSize }]}
+              value={nameText}
+              onChangeText={setNameText}
+              autoFocus
+              selectTextOnFocus
+              returnKeyType="next"
+            />
+            <Text style={styles.amountLabel}>Amount</Text>
             <TextInput
               style={[styles.amountInput, { fontFamily, fontSize }]}
               value={amountText}
               onChangeText={setAmountText}
               placeholder={`e.g. "12" or "1.2 pounds"`}
-              autoFocus
-              selectTextOnFocus
               onSubmitEditing={commitAmount}
               returnKeyType="done"
             />
@@ -875,6 +1040,48 @@ export default function ShoppingSection() {
           </View>
         </KeyboardAvoidingView>
       </Modal>
+
+      {/* Item action menu, opened by long-pressing an item. */}
+      <ItemMenuModal
+        visible={moveItem != null}
+        title={moveItem?.name ?? ''}
+        actions={[
+          {
+            label: moveItem?.checked ? 'Un-cross off' : 'Cross off',
+            onPress: () => {
+              if (!moveItem) return;
+              setMoveItem(null);
+              db.setShoppingChecked(moveItem.id, !moveItem.checked);
+              refreshItems(activeListId);
+              pushShoppingListIfShared(moveItem.listId);
+            },
+          },
+          {
+            label: 'Edit',
+            onPress: () => {
+              if (!moveItem) return;
+              const item = moveItem;
+              setMoveItem(null);
+              openAmountEditor(item);
+            },
+          },
+          {
+            label: 'Delete',
+            destructive: true,
+            onPress: () => {
+              if (!moveItem) return;
+              setMoveItem(null);
+              db.deleteShoppingItem(moveItem.id);
+              refreshItems(activeListId);
+              pushShoppingListIfShared(moveItem.listId);
+            },
+          },
+        ]}
+        lists={lists.filter((l) => l.id !== moveItem?.listId)}
+        onPick={(targetId) => moveItem && moveItemTo(moveItem, targetId)}
+        onPickCopy={(targetId) => moveItem && copyItemTo(moveItem, targetId)}
+        onClose={() => setMoveItem(null)}
+      />
 
       <DictionaryModal visible={dictionaryOpen} onClose={() => setDictionaryOpen(false)} />
 
@@ -962,6 +1169,12 @@ const styles = StyleSheet.create({
   },
   tabActive: {
     backgroundColor: '#fffdf5',
+  },
+  tabDropTarget: {
+    paddingVertical: 18,
+    borderWidth: 2,
+    borderColor: 'rgba(26,95,180,0.35)',
+    borderStyle: 'dashed',
   },
   tabDragOver: {
     backgroundColor: '#d6e6fb',
@@ -1057,6 +1270,12 @@ const styles = StyleSheet.create({
     color: '#1a5fb4',
     fontSize: 14,
   },
+  itemRowDragging: {
+    backgroundColor: '#e8f0fb',
+  },
+  dragHandleIcon: {
+    color: 'rgba(0,0,0,0.35)',
+  },
   itemRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1122,6 +1341,12 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     marginBottom: 10,
     color: '#222',
+  },
+  amountLabel: {
+    fontSize: 13,
+    color: '#666',
+    marginTop: 8,
+    marginBottom: 4,
   },
   amountInput: {
     borderWidth: 1,
@@ -1218,6 +1443,7 @@ const styles = StyleSheet.create({
   },
   renameActions: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     alignItems: 'center',
     marginTop: 12,
   },

@@ -23,6 +23,8 @@ interface Props {
   onDragEnd?: (task: Task, pageX: number, pageY: number) => void;
   /** True while this specific card is the one currently being dragged. */
   dragging?: boolean;
+  /** Long-press on the title: open the task's action menu (move/delete). */
+  onMoveRequest?: (task: Task) => void;
 }
 
 /**
@@ -40,6 +42,7 @@ export default function TaskCard({
   onDragMove,
   onDragEnd,
   dragging,
+  onMoveRequest,
 }: Props) {
   const [expanded, setExpanded] = useState(false);
   const { fontFamily, fontSize, scale } = useTextSettings();
@@ -123,7 +126,14 @@ export default function TaskCard({
             {task.done ? '✓' : ''}
           </Text>
         </Pressable>
-        <Pressable onPress={handleTap} style={styles.titleTapArea}>
+        <Pressable
+          onPress={handleTap}
+          // Long-press opens the "Move to list" picker - a menu is reliable
+          // where the old long-press-drag was easy to fumble.
+          onLongPress={() => onMoveRequest?.(task)}
+          delayLongPress={300}
+          style={styles.titleTapArea}
+        >
           <Text
             style={[styles.title, task.done && styles.doneText, { fontFamily, fontSize }]}
             numberOfLines={expanded ? undefined : 1}

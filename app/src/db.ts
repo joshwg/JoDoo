@@ -385,6 +385,55 @@ export function deleteList(id: number): void {
   db.runSync('DELETE FROM lists WHERE id = ?', id);
 }
 
+/** "X copy", or "X copy 2", "X copy 3", ... - the first name not in taken. */
+function uniqueCopyName(base: string, taken: Set<string>): string {
+  let name = `${base} copy`;
+  for (let n = 2; taken.has(name); n++) name = `${base} copy ${n}`;
+  return name;
+}
+
+/**
+ * Duplicates a list into a brand-new local, unshared list: same tasks, fresh
+ * uuids (uuids are never reused across lists), no share binding and no sync
+ * state. Lets a member of a shared list preserve a private copy that no other
+ * device can change.
+ */
+export function copyList(id: number): TodoList {
+  const src = db.getFirstSync<ListRow>('SELECT * FROM lists WHERE id = ?', id);
+  if (!src) throw new Error('list not found');
+  const name = uniqueCopyName(src.name, new Set(getLists().map((l) => l.name)));
+  let copy!: TodoList;
+  db.withTransactionSync(() => {
+    const pos = db.getFirstSync<{ p: number }>(
+      'SELECT COALESCE(MAX(position), 0) + 1 AS p FROM lists'
+    )!.p;
+    const res = db.runSync('INSERT INTO lists (name, position) VALUES (?, ?)', name, pos);
+    const newId = Number(res.lastInsertRowId);
+    const rows = db.getAllSync<TaskRow>(
+      'SELECT * FROM tasks WHERE list_id = ? ORDER BY position, id',
+      id
+    );
+    const now = new Date().toISOString();
+    for (const r of rows) {
+      db.runSync(
+        'INSERT INTO tasks (list_id, uuid, title, description, due_date, color_index, done, created_at, position, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        newId,
+        generateUuid(),
+        r.title,
+        r.description,
+        r.due_date,
+        r.color_index,
+        r.done,
+        r.created_at,
+        r.position,
+        now
+      );
+    }
+    copy = { id: newId, name, position: pos, shareKey: null };
+  });
+  return copy;
+}
+
 /** Deletes every todo list (tasks, sync state, and share bindings included),
  *  then recreates the single default list so the To Do section is never
  *  empty. Only this device is reset - shared copies on the server and on
@@ -535,6 +584,31 @@ export function moveTaskToList(id: number, newListId: number): void {
     );
   }
   markListDirty(newListId);
+}
+
+/** Copies a task into another list: a brand-new row with a fresh uuid, so
+ *  the source list (and its share) is untouched. */
+export function copyTaskToList(id: number, targetListId: number): void {
+  const r = db.getFirstSync<TaskRow>('SELECT * FROM tasks WHERE id = ?', id);
+  if (!r) return;
+  const position = db.getFirstSync<{ p: number }>(
+    'SELECT COALESCE(MAX(position), -1) + 1 AS p FROM tasks WHERE list_id = ?',
+    targetListId
+  )!.p;
+  db.runSync(
+    'INSERT INTO tasks (list_id, uuid, title, description, due_date, color_index, done, created_at, position, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    targetListId,
+    generateUuid(),
+    r.title,
+    r.description,
+    r.due_date,
+    r.color_index,
+    r.done,
+    r.created_at,
+    position,
+    new Date().toISOString()
+  );
+  markListDirty(targetListId);
 }
 
 /** Persists a new task order within a list (used by drag-to-reorder in the UI). */
@@ -781,6 +855,40 @@ export function deleteShoppingList(id: number): void {
   db.runSync('DELETE FROM shopping_lists WHERE id = ?', id);
 }
 
+/** Shopping counterpart of {@link copyList}. */
+export function copyShoppingList(id: number): ShoppingList {
+  const src = db.getFirstSync<ListRow>('SELECT * FROM shopping_lists WHERE id = ?', id);
+  if (!src) throw new Error('list not found');
+  const name = uniqueCopyName(src.name, new Set(getShoppingLists().map((l) => l.name)));
+  let copy!: ShoppingList;
+  db.withTransactionSync(() => {
+    const pos = db.getFirstSync<{ p: number }>(
+      'SELECT COALESCE(MAX(position), 0) + 1 AS p FROM shopping_lists'
+    )!.p;
+    const res = db.runSync('INSERT INTO shopping_lists (name, position) VALUES (?, ?)', name, pos);
+    const newId = Number(res.lastInsertRowId);
+    const rows = db.getAllSync<ShoppingRow>(
+      'SELECT * FROM shopping_items WHERE list_id = ? ORDER BY position, id',
+      id
+    );
+    const now = new Date().toISOString();
+    for (const r of rows) {
+      db.runSync(
+        'INSERT INTO shopping_items (list_id, uuid, name, checked, position, amount, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        newId,
+        generateUuid(),
+        r.name,
+        r.checked,
+        r.position,
+        r.amount,
+        now
+      );
+    }
+    copy = { id: newId, name, position: pos, shareKey: null };
+  });
+  return copy;
+}
+
 /** Shopping counterpart of {@link deleteAllLists}. */
 export function deleteAllShoppingLists(): ShoppingList {
   db.withTransactionSync(() => {
@@ -890,16 +998,6 @@ export function setShoppingChecked(id: number, checked: boolean): void {
   markShoppingListOfItemDirty(id);
 }
 
-/** Sets or clears (via null/empty) a shopping item's free-form amount. */
-export function setShoppingAmount(id: number, amount: string | null): void {
-  db.runSync(
-    'UPDATE shopping_items SET amount = ?, updated_at = ? WHERE id = ?',
-    amount && amount.trim() ? amount.trim() : null,
-    new Date().toISOString(),
-    id
-  );
-  markShoppingListOfItemDirty(id);
-}
 
 /** Tombstones shopping items about to be deleted, but only when their list
  *  is shared (unshared lists never merge). Must run while the rows exist. */
@@ -918,6 +1016,72 @@ export function deleteShoppingItem(id: number): void {
   markShoppingListOfItemDirty(id);
   tombstoneShoppingItemsIfShared([id]);
   db.runSync('DELETE FROM shopping_items WHERE id = ?', id);
+}
+
+/** Shopping counterpart of {@link moveTaskToList}. */
+export function moveShoppingItemToList(id: number, newListId: number): void {
+  // Mark the source list while the item still points at it; to that list's
+  // share this is a deletion, so it also needs a tombstone.
+  markShoppingListOfItemDirty(id);
+  tombstoneShoppingItemsIfShared([id]);
+  const position = db.getFirstSync<{ p: number }>(
+    'SELECT COALESCE(MAX(position), -1) + 1 AS p FROM shopping_items WHERE list_id = ?',
+    newListId
+  )!.p;
+  db.runSync(
+    'UPDATE shopping_items SET list_id = ?, position = ?, updated_at = ? WHERE id = ?',
+    newListId,
+    position,
+    new Date().toISOString(),
+    id
+  );
+  // If this item once lived in (and was tombstoned out of) the destination
+  // list, its return must not be undone by the old tombstone.
+  const uuid = db.getFirstSync<{ uuid: string }>(
+    'SELECT uuid FROM shopping_items WHERE id = ?',
+    id
+  )?.uuid;
+  if (uuid) {
+    db.runSync(
+      'DELETE FROM sync_deletions WHERE scope = ? AND uuid = ?',
+      shoppingScope(newListId),
+      uuid
+    );
+  }
+  markShoppingListDirty(newListId);
+}
+
+/** Shopping counterpart of {@link copyTaskToList}. */
+export function copyShoppingItemToList(id: number, targetListId: number): void {
+  const r = db.getFirstSync<ShoppingRow>('SELECT * FROM shopping_items WHERE id = ?', id);
+  if (!r) return;
+  const position = db.getFirstSync<{ p: number }>(
+    'SELECT COALESCE(MAX(position), -1) + 1 AS p FROM shopping_items WHERE list_id = ?',
+    targetListId
+  )!.p;
+  db.runSync(
+    'INSERT INTO shopping_items (list_id, uuid, name, checked, position, amount, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    targetListId,
+    generateUuid(),
+    r.name,
+    r.checked,
+    position,
+    r.amount,
+    new Date().toISOString()
+  );
+  markShoppingListDirty(targetListId);
+}
+
+/** Edits an item's name and amount together (the long-press Edit dialog). */
+export function updateShoppingItem(id: number, name: string, amount: string | null): void {
+  markShoppingListOfItemDirty(id);
+  db.runSync(
+    'UPDATE shopping_items SET name = ?, amount = ?, updated_at = ? WHERE id = ?',
+    name,
+    amount,
+    new Date().toISOString(),
+    id
+  );
 }
 
 export function clearCheckedShoppingItems(listId: number): void {

@@ -94,21 +94,50 @@ jodoo.example.com {
 Caddy automatically obtains a certificate and forwards both normal requests
 and the WebSocket upgrade (`/ws/{key}`) to the Go service.
 
+Apache equivalent (inside the TLS vhost). The proxy must forward the WHOLE
+path space, not a hand-picked list of prefixes - the server serves pages at
+`/join/{key}` and at bare `/{key}`, so path-scoped ProxyPass rules silently
+404 them at the proxy:
+
+```apache
+ProxyPreserveHost On
+RequestHeader set X-Forwarded-Proto "https"
+
+# WebSocket sync (needs mod_proxy_wstunnel; the more specific path wins).
+ProxyPass        "/ws/" "ws://127.0.0.1:8080/ws/"
+ProxyPassReverse "/ws/" "ws://127.0.0.1:8080/ws/"
+
+# Everything else: API, /join/{key} landing pages, /{key} browser pages.
+ProxyPass        "/" "http://127.0.0.1:8080/"
+ProxyPassReverse "/" "http://127.0.0.1:8080/"
+```
+
+(Apache >= 2.4.47 can replace the `/ws/` pair with a single
+`ProxyPass "/" "http://127.0.0.1:8080/" upgrade=websocket`.)
+`X-Forwarded-Proto` is not optional: the join page uses it to build the
+https deep link.
+
 ## API
 
-All endpoints except `GET /join/{key}` require the server key, either as
-`Authorization: Bearer <key>` or query param `?serverKey=<key>` (the latter
-exists only because some WebSocket clients can't set custom headers).
+All endpoints except the two HTML pages (`GET /join/{key}` and
+`GET /{key}`) require the server key, either as `Authorization: Bearer <key>`
+or query param `?serverKey=<key>` (the latter exists only because some
+WebSocket clients can't set custom headers).
 
 - `POST /api/lists` `{ "kind": "todo"|"shopping", "name": "...", "items": [...] }`
   -> creates a share, returns a freshly generated 20-char lowercase
   alphanumeric key plus the stored snapshot.
 - `GET /api/lists/{key}` -> current snapshot for a share (used to preview/
   fetch before joining).
-- `GET /join/{key}` -> the one unauthenticated endpoint: a small HTML
-  landing page behind share links ("Open in Jodoo" deep link plus the key
-  for manual entry). It never reads the store, so it neither confirms nor
-  denies that a key exists.
+- `GET /join/{key}` -> unauthenticated: a small HTML landing page behind
+  share links ("Open in Jodoo" deep link plus the key for manual entry). It
+  never reads the store, so it neither confirms nor denies that a key exists.
+- `GET /{key}` -> unauthenticated but completely static: the in-browser
+  view/edit page for a share. It embeds no list data - its JavaScript asks
+  the visitor for the server key (remembered in the browser's localStorage),
+  then uses `GET /api/lists/{key}` and the WebSocket like any other client,
+  speaking the same item-level merge protocol (see `listpage.go`; keep its
+  merge in step with `app/src/syncCore.ts`).
 - `GET /ws/{key}` -> upgrades to a WebSocket. On connect the server
   immediately sends `{"type":"snapshot", ...}`. Either side can then send
   `{"type":"update","name":"...","items":[...]}`; the server stores it,

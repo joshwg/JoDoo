@@ -1,4 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
+import Constants from 'expo-constants';
 import React, { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
@@ -15,7 +16,7 @@ import QRCode from 'react-native-qrcode-svg';
 import { clearServerConfig, getServerConfig, setServerConfig } from '../serverConfig';
 import { makeServerSetupPayload, parseServerSetupPayload } from '../serverSetup';
 import { refreshSyncConnections } from '../syncManager';
-import { testServerConnection } from '../syncClient';
+import { fetchServerVersion, testServerConnection } from '../syncClient';
 import { useTextSettings } from '../textSettings';
 import QrScanModal from './QrScanModal';
 
@@ -31,13 +32,29 @@ export default function ServerSettingsModal({ visible, onClose }: Props) {
   const [keyVisible, setKeyVisible] = useState(false);
   const [setupQrVisible, setSetupQrVisible] = useState(false);
   const [scanVisible, setScanVisible] = useState(false);
+  // null = no probe yet / no URL, 'checking' while a probe is in flight,
+  // 'unreachable' when the probe failed, otherwise the server's version.
+  const [serverVersion, setServerVersion] = useState<string | null>(null);
   const { scale } = useTextSettings();
+
+  // The app's own version, from app.json via the build-time config.
+  const appVersion = Constants.expoConfig?.version ?? '?';
+
+  const probeServerVersion = (url: string) => {
+    if (!url.trim()) {
+      setServerVersion(null);
+      return;
+    }
+    setServerVersion('checking');
+    fetchServerVersion(url.trim()).then((v) => setServerVersion(v ?? 'unreachable'));
+  };
 
   useEffect(() => {
     if (!visible) return;
     getServerConfig().then((config) => {
       setBaseUrl(config?.baseUrl ?? '');
       setServerKey(config?.serverKey ?? '');
+      probeServerVersion(config?.baseUrl ?? '');
     });
     setKeyVisible(false);
   }, [visible]);
@@ -51,6 +68,9 @@ export default function ServerSettingsModal({ visible, onClose }: Props) {
       Alert.alert('Connection failed', err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(false);
+      // Re-probe with whatever URL is in the field, so the version line
+      // tracks what the user just tested rather than the saved config.
+      probeServerVersion(baseUrl);
     }
   };
 
@@ -172,6 +192,16 @@ export default function ServerSettingsModal({ visible, onClose }: Props) {
               <Text style={styles.primaryText}>Save</Text>
             </Pressable>
           </View>
+          <Text style={styles.versionLine}>
+            {`App: ${appVersion}  ·  Server: `}
+            {serverVersion == null
+              ? 'not configured'
+              : serverVersion === 'checking'
+                ? 'checking…'
+                : serverVersion === 'unreachable'
+                  ? 'unreachable'
+                  : serverVersion}
+          </Text>
         </View>
 
         {/* Setup QR display - nested so it stacks above this modal on iOS. */}
@@ -318,6 +348,12 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     marginTop: 16,
+  },
+  versionLine: {
+    marginTop: 10,
+    fontSize: 12,
+    color: '#999',
+    textAlign: 'center',
   },
   spacer: {
     flex: 1,

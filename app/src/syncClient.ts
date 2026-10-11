@@ -109,6 +109,23 @@ export async function testServerConnection(config: ServerConfig): Promise<void> 
   // (deliberately bogus) key - i.e. the connection is good.
 }
 
+/**
+ * The server's version, read from the unauthenticated /healthz endpoint,
+ * which answers "ok <version>". Returns null when the server is unreachable
+ * or answers with something unexpected, so callers can show "unreachable"
+ * without a try/catch.
+ */
+export async function fetchServerVersion(rawBaseUrl: string): Promise<string | null> {
+  try {
+    const res = await fetch(`${normalizeBaseUrl(rawBaseUrl)}/healthz`);
+    if (!res.ok) return null;
+    const match = /^ok\s+(\S+)$/.exec((await res.text()).trim());
+    return match ? match[1] : null;
+  } catch {
+    return null;
+  }
+}
+
 type SnapshotHandler = (snapshot: SharePayload) => void;
 
 /**

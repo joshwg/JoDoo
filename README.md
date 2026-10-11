@@ -6,7 +6,7 @@ If you use a server then you can share your lists with other JoDoo users. Everyt
 
 A simple Android to-do and shopping list app. No accounts, no passwords — everything is stored locally on the device in SQLite.
 
-Built with Expo (React Native + TypeScript), following the same WSL + EAS workflow as `flightscan/apps/mobile`.
+Built with Expo (React Native + TypeScript). All tooling runs in WSL (Ubuntu); APKs are built in the cloud with EAS.
 
 ## Sections
 
@@ -22,7 +22,9 @@ Built with Expo (React Native + TypeScript), following the same WSL + EAS workfl
   - Drag up and drop onto a tab to move the task to that list. The tab strip enlarges and highlights the tab you're hovering over, and auto-scrolls if you drag near the left/right edge of the screen so off-screen tabs stay reachable.
   - Drop it between two other cards in the same list to reorder it there instead.
 
-**Shopping** — a single checklist. Add items, check them off, and clear checked items.
+**Shopping** — checklists, one per tab, with the same multi-list tabs as To Do. Add items, check them off, and clear checked items. Autocomplete suggests items from a dictionary that learns what you buy.
+
+**Item menu** (both sections): touch and hold a task or shopping item to open its menu — Cross off (or Un-cross off), Edit, Delete, Move to… and Copy to… (pick any other list; Copy leaves the original in place). Every item also has a ☰ handle: drag it onto another list's tab to move the item there (task handles additionally reorder within the list). Touch and hold any tab — active or not — to switch to that list and open its rename/share/copy/delete dialog.
 
 ## Development
 

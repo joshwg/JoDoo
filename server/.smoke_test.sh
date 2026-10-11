@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-cd /home/josh/projects/Jodoo/server
+cd "$(dirname "$(readlink -f "$0")")"
 
 export JODOO_SERVER_KEY="thisisatestserverkey1234567890"
 export PORT=8099
@@ -42,6 +42,17 @@ curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8099/join/NOT-A-VALID-
 
 echo "--- get nonexistent share ---"
 curl -s -o /dev/null -w "%{http_code}\n" -H "Authorization: Bearer $JODOO_SERVER_KEY" http://localhost:8099/api/lists/doesnotexist00000000
+
+echo "--- browser list page (unauthenticated, static, must embed no data) ---"
+LIST_PAGE=$(curl -s http://localhost:8099/$KEY)
+echo "$LIST_PAGE" | grep -q "Jodoo" && echo "page ok" || { echo "MISSING LIST PAGE"; exit 1; }
+echo "$LIST_PAGE" | grep -q "Groceries" && { echo "LIST PAGE LEAKS DATA"; exit 1; } || echo "no data leak ok"
+
+echo "--- list page with malformed key (should be 404) ---"
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8099/NOT-A-VALID-KEY
+
+echo "--- healthz still wins over the {key} wildcard ---"
+curl -s http://localhost:8099/healthz | grep -q "^ok" && echo "route precedence ok" || { echo "BROKEN ROUTE PRECEDENCE"; exit 1; }
 
 kill $PID 2>/dev/null || true
 trap - EXIT

@@ -1,0 +1,6 @@
+# Everything is developed in WSL: text files are LF in the repo and on disk,
+# no matter what core.autocrlf a clone happens to have.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.jar binary
