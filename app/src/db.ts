@@ -586,6 +586,49 @@ export function moveTaskToList(id: number, newListId: number): void {
   markListDirty(newListId);
 }
 
+/** "Groceries", "Groceries 2", ... - import counterpart of {@link uniqueCopyName}. */
+function uniqueListName(base: string, taken: Set<string>): string {
+  const name = base.trim() || 'Imported';
+  if (!taken.has(name)) return name;
+  let n = 2;
+  while (taken.has(`${name} ${n}`)) n++;
+  return `${name} ${n}`;
+}
+
+/** Creates a new local, unshared todo list from imported lines ("Import
+ *  List" on the "+" menu). */
+export function importTodoList(
+  name: string,
+  items: { title: string; done: boolean; description: string; dueDate: string | null }[]
+): TodoList {
+  const unique = uniqueListName(name, new Set(getLists().map((l) => l.name)));
+  let created!: TodoList;
+  db.withTransactionSync(() => {
+    const pos = db.getFirstSync<{ p: number }>(
+      'SELECT COALESCE(MAX(position), 0) + 1 AS p FROM lists'
+    )!.p;
+    const res = db.runSync('INSERT INTO lists (name, position) VALUES (?, ?)', unique, pos);
+    const listId = Number(res.lastInsertRowId);
+    const now = new Date().toISOString();
+    items.forEach((it, i) => {
+      db.runSync(
+        'INSERT INTO tasks (list_id, uuid, title, description, due_date, color_index, done, position, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        listId,
+        generateUuid(),
+        it.title.trim().slice(0, MAX_TASK_TITLE_LENGTH),
+        it.description.trim().slice(0, MAX_TASK_DESCRIPTION_LENGTH),
+        it.dueDate,
+        i % 8,
+        it.done ? 1 : 0,
+        i,
+        now
+      );
+    });
+    created = { id: listId, name: unique, position: pos, shareKey: null };
+  });
+  return created;
+}
+
 /** Copies a task into another list: a brand-new row with a fresh uuid, so
  *  the source list (and its share) is untouched. */
 export function copyTaskToList(id: number, targetListId: number): void {
@@ -1049,6 +1092,41 @@ export function moveShoppingItemToList(id: number, newListId: number): void {
     );
   }
   markShoppingListDirty(newListId);
+}
+
+/** Shopping counterpart of {@link importTodoList}. */
+export function importShoppingList(
+  name: string,
+  items: { name: string; checked: boolean; amount: string | null }[]
+): ShoppingList {
+  const unique = uniqueListName(name, new Set(getShoppingLists().map((l) => l.name)));
+  let created!: ShoppingList;
+  db.withTransactionSync(() => {
+    const pos = db.getFirstSync<{ p: number }>(
+      'SELECT COALESCE(MAX(position), 0) + 1 AS p FROM shopping_lists'
+    )!.p;
+    const res = db.runSync(
+      'INSERT INTO shopping_lists (name, position) VALUES (?, ?)',
+      unique,
+      pos
+    );
+    const listId = Number(res.lastInsertRowId);
+    const now = new Date().toISOString();
+    items.forEach((it, i) => {
+      db.runSync(
+        'INSERT INTO shopping_items (list_id, uuid, name, checked, position, amount, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        listId,
+        generateUuid(),
+        it.name.trim().slice(0, MAX_SHOPPING_ITEM_NAME_LENGTH),
+        it.checked ? 1 : 0,
+        i,
+        it.amount,
+        now
+      );
+    });
+    created = { id: listId, name: unique, position: pos, shareKey: null };
+  });
+  return created;
 }
 
 /** Shopping counterpart of {@link copyTaskToList}. */

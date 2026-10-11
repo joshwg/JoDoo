@@ -9,6 +9,7 @@ import {
   PanResponder,
   Pressable,
   ScrollView,
+  Share,
   StyleSheet,
   Text,
   TextInput,
@@ -16,6 +17,7 @@ import {
 } from 'react-native';
 import { APP_NAME, APP_VERSION, BUILD_DATE, COPYRIGHT } from '../appInfo';
 import * as db from '../db';
+import { parseListText, shoppingListToText } from '../exportText';
 import { subscribeRemoteUpdate } from '../remoteUpdates';
 import { joinShareByKey } from '../joinShare';
 import { createShare, shareExists } from '../syncClient';
@@ -25,6 +27,7 @@ import { DictionaryEntry, ShoppingItem, ShoppingList } from '../types';
 import DictionaryModal from './DictionaryModal';
 import EnterKeyModal from './EnterKeyModal';
 import FontSettingsModal from './FontSettingsModal';
+import ImportListModal from './ImportListModal';
 import ItemMenuModal from './ItemMenuModal';
 import JoinScanModal from './JoinScanModal';
 import ListTab from './ListTab';
@@ -57,21 +60,38 @@ function ItemDragHandle({
   onDragMoveRef.current = onDragMove;
   const onDragEndRef = useRef(onDragEnd);
   onDragEndRef.current = onDragEnd;
+  // Touch pageY and measureInWindow Y can disagree by the status-bar height
+  // on some Android setups, which would put the tab rects (measured via
+  // measureInWindow) out of reach of the finger coordinates. Calibrated at
+  // drag start from the handle's own position (zero on well-behaved devices).
+  const viewRef = useRef<View>(null);
+  const pageYOffsetRef = useRef(0);
   const pan = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
       onMoveShouldSetPanResponder: () => true,
       // Never let the list scroll (or any ancestor) steal an active drag.
       onPanResponderTerminationRequest: () => false,
-      onPanResponderGrant: () => onDragStartRef.current(itemRef.current),
+      onPanResponderGrant: (evt) => {
+        const { pageY, locationY } = evt.nativeEvent;
+        pageYOffsetRef.current = 0;
+        viewRef.current?.measureInWindow((_x, y) => {
+          pageYOffsetRef.current = pageY - (y + locationY);
+        });
+        onDragStartRef.current(itemRef.current);
+      },
       onPanResponderMove: (evt) =>
-        onDragMoveRef.current(evt.nativeEvent.pageX, evt.nativeEvent.pageY),
+        onDragMoveRef.current(
+          evt.nativeEvent.pageX,
+          evt.nativeEvent.pageY - pageYOffsetRef.current
+        ),
       onPanResponderRelease: () => onDragEndRef.current(itemRef.current),
       onPanResponderTerminate: () => onDragEndRef.current(itemRef.current),
     })
   ).current;
   return (
     <View
+      ref={viewRef}
       {...pan.panHandlers}
       style={{ paddingLeft: 6 * scale, paddingVertical: 2 * scale }}
       hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
@@ -92,6 +112,7 @@ export default function ShoppingSection() {
   const [dictionaryOpen, setDictionaryOpen] = useState(false);
   const [aboutOpen, setAboutOpen] = useState(false);
   const [addMenuVisible, setAddMenuVisible] = useState(false);
+  const [importVisible, setImportVisible] = useState(false);
   const [joinVisible, setJoinVisible] = useState(false);
   const [scanVisible, setScanVisible] = useState(false);
   const [renamingList, setRenamingList] = useState<ShoppingList | null>(null);
@@ -559,6 +580,31 @@ export default function ShoppingSection() {
     refreshLists(copy.id);
   };
 
+  const importFromText = (text: string) => {
+    const parsed = parseListText(text);
+    if (parsed.items.length === 0) {
+      Alert.alert('Nothing to import', 'No list items found in that text.');
+      return;
+    }
+    const list = db.importShoppingList(
+      parsed.name ?? 'Imported',
+      parsed.items.map((it) => ({ name: it.text, checked: it.checked, amount: it.amount }))
+    );
+    setImportVisible(false);
+    refreshLists(list.id);
+  };
+
+  // Hands the list as readable text to the system share sheet (email,
+  // messages, ...). Reading it back in is `Import` on the "+" menu.
+  const exportList = (list: ShoppingList) => {
+    setRenamingList(null);
+    Share.share({ message: shoppingListToText(list.name, db.getShoppingItems(list.id)) }).catch(
+      () => {
+        // Dismissed or no share targets - nothing to clean up.
+      }
+    );
+  };
+
   const confirmDeleteList = (list: ShoppingList) => {
     setRenamingList(null);
     Alert.alert('Delete list', `Delete "${list.name}" and all of its items?`, [
@@ -579,7 +625,20 @@ export default function ShoppingSection() {
 
   const changeInput = (text: string) => {
     setNewItem(text);
-    setSuggestions(text.trim() ? db.suggestItems(text, 3) : []);
+    if (!text.trim()) {
+      setSuggestions([]);
+      return;
+    }
+    // Never suggest something already on the list (checked or not) - the
+    // dictionary is for speeding up what's missing. Over-fetch so filtering
+    // still leaves up to 3 chips.
+    const onList = new Set(items.map((i) => i.name.trim().toLowerCase()));
+    setSuggestions(
+      db
+        .suggestItems(text, 10)
+        .filter((s) => !onList.has(s.name.trim().toLowerCase()))
+        .slice(0, 3)
+    );
   };
 
   const addItem = (raw: string) => {
@@ -592,6 +651,39 @@ export default function ShoppingSection() {
     const name = (commaIndex === -1 ? trimmed : trimmed.slice(0, commaIndex)).trim();
     const amount = commaIndex === -1 ? null : trimmed.slice(commaIndex + 1).trim() || null;
     if (!name) return;
+    // No duplicates: adding a name already on the list re-activates the
+    // existing row instead. Pending items with an INTEGER amount are
+    // additive - a bare re-add means one more, an integer amount sums -
+    // while free-form amounts ("1.2 pounds") only ever replace. Re-adding
+    // a crossed-off item just un-crosses it, amount untouched.
+    const isInt = (v: string | null): v is string => v != null && /^\d+$/.test(v.trim());
+    const existing = items.find((i) => i.name.trim().toLowerCase() === name.toLowerCase());
+    if (existing) {
+      if (existing.checked) {
+        db.setShoppingChecked(existing.id, false);
+      } else {
+        let next: string | null | undefined;
+        if (isInt(existing.amount) && amount == null) {
+          next = String(parseInt(existing.amount.trim(), 10) + 1);
+        } else if (isInt(existing.amount) && isInt(amount)) {
+          next = String(parseInt(existing.amount.trim(), 10) + parseInt(amount.trim(), 10));
+        } else if (amount != null && amount !== existing.amount) {
+          next = amount;
+        }
+        if (next === undefined) {
+          // Nothing to change - it's already on the list.
+          setNewItem('');
+          setSuggestions([]);
+          return;
+        }
+        db.updateShoppingItem(existing.id, existing.name, next);
+      }
+      refreshItems(activeListId);
+      pushShoppingListIfShared(activeListId);
+      setNewItem('');
+      setSuggestions([]);
+      return;
+    }
     // Learns new items and bumps usage/casing for known ones.
     db.recordItemUse(name);
     db.addShoppingItem(activeListId, name, amount);
@@ -951,6 +1043,13 @@ export default function ShoppingSection() {
                 >
                   <Text style={styles.shareText}>Copy</Text>
                 </Pressable>
+                <Pressable
+                  onPress={() => renamingList && exportList(renamingList)}
+                  style={styles.renameButton}
+                  disabled={shareBusy}
+                >
+                  <Text style={styles.shareText}>Export</Text>
+                </Pressable>
                 <View style={styles.renameSpacer} />
                 <Pressable onPress={() => setRenamingList(null)} style={styles.renameButton}>
                   <Text style={styles.cancelText}>Cancel</Text>
@@ -983,6 +1082,16 @@ export default function ShoppingSection() {
             <View style={styles.menuDivider} />
             <Pressable style={styles.menuItem} onPress={startScanList}>
               <Text style={styles.menuText}>Scan QR Code</Text>
+            </Pressable>
+            <View style={styles.menuDivider} />
+            <Pressable
+              style={styles.menuItem}
+              onPress={() => {
+                setAddMenuVisible(false);
+                setImportVisible(true);
+              }}
+            >
+              <Text style={styles.menuText}>Import List</Text>
             </Pressable>
             <View style={styles.menuDivider} />
             <Pressable style={styles.menuItem} onPress={confirmDeleteAllLists}>
@@ -1081,6 +1190,13 @@ export default function ShoppingSection() {
         onPick={(targetId) => moveItem && moveItemTo(moveItem, targetId)}
         onPickCopy={(targetId) => moveItem && copyItemTo(moveItem, targetId)}
         onClose={() => setMoveItem(null)}
+      />
+
+      <ImportListModal
+        visible={importVisible}
+        noun="item"
+        onImport={importFromText}
+        onClose={() => setImportVisible(false)}
       />
 
       <DictionaryModal visible={dictionaryOpen} onClose={() => setDictionaryOpen(false)} />
@@ -1274,7 +1390,8 @@ const styles = StyleSheet.create({
     backgroundColor: '#e8f0fb',
   },
   dragHandleIcon: {
-    color: 'rgba(0,0,0,0.35)',
+    // Dark enough to read as enabled, matching the delete ✕.
+    color: 'rgba(0,0,0,0.65)',
   },
   itemRow: {
     flexDirection: 'row',
@@ -1393,7 +1510,8 @@ const styles = StyleSheet.create({
   },
   delete: {
     fontSize: 16,
-    color: '#bbb',
+    // Dark enough to read as enabled - #bbb looked disabled.
+    color: '#555',
   },
   empty: {
     textAlign: 'center',

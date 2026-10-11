@@ -9,12 +9,14 @@ import {
   PanResponder,
   Pressable,
   ScrollView,
+  Share,
   StyleSheet,
   Text,
   TextInput,
   View,
 } from 'react-native';
 import * as db from '../db';
+import { parseListText, todoListToText } from '../exportText';
 import { subscribeRemoteUpdate } from '../remoteUpdates';
 import { joinShareByKey } from '../joinShare';
 import { createShare, shareExists } from '../syncClient';
@@ -27,6 +29,7 @@ import JoinScanModal from './JoinScanModal';
 import ListTab from './ListTab';
 import ServerSettingsModal from './ServerSettingsModal';
 import ShareKeyModal from './ShareKeyModal';
+import ImportListModal from './ImportListModal';
 import ItemMenuModal from './ItemMenuModal';
 import TaskCard from './TaskCard';
 import TaskEditorModal from './TaskEditorModal';
@@ -40,6 +43,7 @@ export default function TodoSection() {
   const [renamingList, setRenamingList] = useState<TodoList | null>(null);
   const [renameText, setRenameText] = useState('');
   const [addMenuVisible, setAddMenuVisible] = useState(false);
+  const [importVisible, setImportVisible] = useState(false);
   const [joinVisible, setJoinVisible] = useState(false);
   const [scanVisible, setScanVisible] = useState(false);
   const [settingsMenuOpen, setSettingsMenuOpen] = useState(false);
@@ -603,6 +607,35 @@ export default function TodoSection() {
     refreshLists(copy.id);
   };
 
+  const importFromText = (text: string) => {
+    const parsed = parseListText(text);
+    if (parsed.items.length === 0) {
+      Alert.alert('Nothing to import', 'No list items found in that text.');
+      return;
+    }
+    const list = db.importTodoList(
+      parsed.name ?? 'Imported',
+      parsed.items.map((it) => ({
+        // A "(…)" suffix is a shopping amount; for tasks it stays in the title.
+        title: it.amount ? `${it.text} (${it.amount})` : it.text,
+        done: it.checked,
+        description: it.note,
+        dueDate: it.due,
+      }))
+    );
+    setImportVisible(false);
+    refreshLists(list.id);
+  };
+
+  // Hands the list as readable text to the system share sheet (email,
+  // messages, ...). Reading it back in is `Import` on the "+" menu.
+  const exportList = (list: TodoList) => {
+    setRenamingList(null);
+    Share.share({ message: todoListToText(list.name, db.getTasks(list.id)) }).catch(() => {
+      // Dismissed or no share targets - nothing to clean up.
+    });
+  };
+
   const confirmDeleteList = (list: TodoList) => {
     setRenamingList(null);
     Alert.alert('Delete list', `Delete "${list.name}" and all of its tasks?`, [
@@ -812,6 +845,13 @@ export default function TodoSection() {
         }}
       />
 
+      <ImportListModal
+        visible={importVisible}
+        noun="task"
+        onImport={importFromText}
+        onClose={() => setImportVisible(false)}
+      />
+
       {/* Task action menu, opened by long-pressing a task's title. */}
       <ItemMenuModal
         visible={moveTask != null}
@@ -903,6 +943,13 @@ export default function TodoSection() {
                 >
                   <Text style={styles.shareText}>Copy</Text>
                 </Pressable>
+                <Pressable
+                  onPress={() => renamingList && exportList(renamingList)}
+                  style={styles.renameButton}
+                  disabled={shareBusy}
+                >
+                  <Text style={styles.shareText}>Export</Text>
+                </Pressable>
                 <View style={styles.renameSpacer} />
                 <Pressable onPress={() => setRenamingList(null)} style={styles.renameButton}>
                   <Text style={styles.cancelText}>Cancel</Text>
@@ -935,6 +982,16 @@ export default function TodoSection() {
             <View style={styles.menuDivider} />
             <Pressable style={styles.menuItem} onPress={startScanList}>
               <Text style={styles.menuText}>Scan QR Code</Text>
+            </Pressable>
+            <View style={styles.menuDivider} />
+            <Pressable
+              style={styles.menuItem}
+              onPress={() => {
+                setAddMenuVisible(false);
+                setImportVisible(true);
+              }}
+            >
+              <Text style={styles.menuText}>Import List</Text>
             </Pressable>
             <View style={styles.menuDivider} />
             <Pressable style={styles.menuItem} onPress={confirmDeleteAllLists}>

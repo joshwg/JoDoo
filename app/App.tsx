@@ -1,18 +1,37 @@
 import { StatusBar } from 'expo-status-bar';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Alert, Linking, PanResponder, Pressable, StyleSheet, Text, View } from 'react-native';
+import {
+  Alert,
+  GestureResponderEvent,
+  Linking,
+  PanResponder,
+  PanResponderGestureState,
+  Pressable,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import * as db from './src/db';
 import { joinShareByKey } from './src/joinShare';
 import { getServerConfig, normalizeBaseUrl } from './src/serverConfig';
 import { parseJoinUrl } from './src/shareLinks';
 import { startSyncManager } from './src/syncManager';
+import { MAX_FONT_SIZE, MIN_FONT_SIZE, getFontSize, setFontSize } from './src/textSettings';
 import ShoppingSection from './src/components/ShoppingSection';
 import TodoSection from './src/components/TodoSection';
 
 type Section = 'todo' | 'shopping';
 
 const SWIPE_THRESHOLD = 50;
+// Two-finger distance must change by this much (px) before the gesture is
+// treated as a pinch rather than a section swipe. A swipe keeps the fingers
+// roughly parallel, so their distance wobbles far less than this.
+const PINCH_CLAIM_DISTANCE = 30;
+
+function touchDistance(touches: { pageX: number; pageY: number }[]): number {
+  return Math.hypot(touches[0].pageX - touches[1].pageX, touches[0].pageY - touches[1].pageY);
+}
 
 export default function App() {
   // Open/create the database once, before first render of either section.
@@ -77,18 +96,97 @@ export default function App() {
     return () => sub.remove();
   }, []);
 
-  // A two-finger horizontal swipe toggles between the To Do and Shopping sections.
+  // Two-finger gestures: a horizontal swipe toggles between the To Do and
+  // Shopping sections; a pinch adjusts the item text size live (the same
+  // setting as ⚙ → Text Settings, persisted). The first clear signal wins:
+  // finger distance changing → pinch, parallel horizontal travel → swipe.
+  // 'pending' = claimed but not yet committed to pinch or swipe.
+  const gestureModeRef = useRef<'pending' | 'swipe' | 'pinch' | null>(null);
+  // Finger distance when two touches were first seen; the pinch/swipe
+  // discrimination measures spread against it.
+  const twoFingerBaseDistRef = useRef<number | null>(null);
+  const pinchStartDistRef = useRef(1);
+  const pinchStartSizeRef = useRef(getFontSize());
+  const lastAppliedSizeRef = useRef<number | null>(null);
+
+  // Two-finger gestures must be claimed in the CAPTURE phase: by the bubble
+  // phase a list's scroll has usually taken the touch (a pinch nearly always
+  // has a vertical component), so the pinch would never be consulted. Any
+  // clear two-finger movement is claimed here; which gesture it is gets
+  // decided inside the responder once the motion shows its shape.
+  const claimTwoFinger = (
+    evt: GestureResponderEvent,
+    gestureState: PanResponderGestureState
+  ): boolean => {
+    const touches = evt.nativeEvent.touches;
+    if (touches.length !== 2) {
+      twoFingerBaseDistRef.current = null;
+      return false;
+    }
+    const dist = touchDistance(touches);
+    if (twoFingerBaseDistRef.current == null) {
+      twoFingerBaseDistRef.current = dist;
+      return false;
+    }
+    const spread = Math.abs(dist - twoFingerBaseDistRef.current);
+    const travel = Math.hypot(gestureState.dx, gestureState.dy);
+    if (spread <= 10 && travel <= 10) return false; // let two-finger taps through
+    gestureModeRef.current = 'pending';
+    pinchStartDistRef.current = dist;
+    pinchStartSizeRef.current = getFontSize();
+    lastAppliedSizeRef.current = null;
+    return true;
+  };
+
+  const endTwoFinger = () => {
+    gestureModeRef.current = null;
+    twoFingerBaseDistRef.current = null;
+  };
+
   const panResponder = useRef(
     PanResponder.create({
-      onMoveShouldSetPanResponder: (evt, gestureState) =>
-        evt.nativeEvent.touches.length === 2 &&
-        Math.abs(gestureState.dx) > 20 &&
-        Math.abs(gestureState.dx) > Math.abs(gestureState.dy) * 1.5,
-      onPanResponderRelease: (_evt, gestureState) => {
-        if (Math.abs(gestureState.dx) >= SWIPE_THRESHOLD) {
-          setSection((current) => (current === 'todo' ? 'shopping' : 'todo'));
+      onMoveShouldSetPanResponderCapture: claimTwoFinger,
+      onMoveShouldSetPanResponder: claimTwoFinger,
+      onPanResponderTerminationRequest: () => false,
+      onPanResponderMove: (evt, gestureState) => {
+        const touches = evt.nativeEvent.touches;
+        if (touches.length !== 2) return;
+        const dist = touchDistance(touches);
+        if (dist <= 0 || pinchStartDistRef.current <= 0) return;
+        if (gestureModeRef.current === 'pending') {
+          const spread = Math.abs(dist - pinchStartDistRef.current);
+          if (spread > PINCH_CLAIM_DISTANCE) {
+            gestureModeRef.current = 'pinch';
+          } else if (
+            Math.abs(gestureState.dx) > 20 &&
+            Math.abs(gestureState.dx) > Math.abs(gestureState.dy) * 1.5
+          ) {
+            gestureModeRef.current = 'swipe';
+          }
+        }
+        if (gestureModeRef.current !== 'pinch') return;
+        const next = Math.round(
+          Math.min(
+            MAX_FONT_SIZE,
+            Math.max(MIN_FONT_SIZE, pinchStartSizeRef.current * (dist / pinchStartDistRef.current))
+          )
+        );
+        // setFontSize persists and re-renders the sections, so only call it
+        // when the rounded size actually changes.
+        if (next !== lastAppliedSizeRef.current) {
+          lastAppliedSizeRef.current = next;
+          setFontSize(next);
         }
       },
+      onPanResponderRelease: (_evt, gestureState) => {
+        // A gesture that never grew into a pinch counts as a swipe if it
+        // traveled far enough horizontally.
+        if (gestureModeRef.current !== 'pinch' && Math.abs(gestureState.dx) >= SWIPE_THRESHOLD) {
+          setSection((current) => (current === 'todo' ? 'shopping' : 'todo'));
+        }
+        endTwoFinger();
+      },
+      onPanResponderTerminate: endTwoFinger,
     }),
   ).current;
 

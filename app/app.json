@@ -2,7 +2,7 @@
   "expo": {
     "name": "Jodoo",
     "slug": "Jodoo",
-    "version": "1.2.4",
+    "version": "1.2.5",
     "scheme": "jodoo",
     "orientation": "portrait",
     "icon": "./assets/icon.png",

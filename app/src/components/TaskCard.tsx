@@ -74,6 +74,15 @@ export default function TaskCard({
     }
   };
 
+  // Touch pageY and measureInWindow Y can disagree by the status-bar height
+  // on some Android setups, which would put the drop targets (measured via
+  // measureInWindow) out of reach of the finger coordinates. Calibrate the
+  // difference at drag start - the handle is under the finger, so comparing
+  // the touch's own coordinates with the handle's measured position yields
+  // the exact offset (zero on well-behaved devices).
+  const handleViewRef = useRef<View>(null);
+  const pageYOffsetRef = useRef(0);
+
   const panResponder = useRef(
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
@@ -83,20 +92,37 @@ export default function TaskCard({
       // Once a drag has begun, never let an ancestor (e.g. the swipe-to-switch-list
       // gesture) steal the responder just because the finger moves sideways.
       onPanResponderTerminationRequest: () => false,
-      onPanResponderGrant: () => {
+      onPanResponderGrant: (evt) => {
         pan.setValue({ x: 0, y: 0 });
+        const { pageY, locationY } = evt.nativeEvent;
+        pageYOffsetRef.current = 0;
+        handleViewRef.current?.measureInWindow((_x, y) => {
+          pageYOffsetRef.current = pageY - (y + locationY);
+        });
         onDragStartRef.current?.(taskRef.current);
       },
       onPanResponderMove: (evt, gestureState) => {
         pan.setValue({ x: gestureState.dx, y: gestureState.dy });
-        onDragMoveRef.current?.(taskRef.current, evt.nativeEvent.pageX, evt.nativeEvent.pageY);
+        onDragMoveRef.current?.(
+          taskRef.current,
+          evt.nativeEvent.pageX,
+          evt.nativeEvent.pageY - pageYOffsetRef.current
+        );
       },
       onPanResponderRelease: (evt) => {
-        onDragEndRef.current?.(taskRef.current, evt.nativeEvent.pageX, evt.nativeEvent.pageY);
+        onDragEndRef.current?.(
+          taskRef.current,
+          evt.nativeEvent.pageX,
+          evt.nativeEvent.pageY - pageYOffsetRef.current
+        );
         Animated.spring(pan, { toValue: { x: 0, y: 0 }, useNativeDriver: true }).start();
       },
       onPanResponderTerminate: (evt) => {
-        onDragEndRef.current?.(taskRef.current, evt.nativeEvent.pageX, evt.nativeEvent.pageY);
+        onDragEndRef.current?.(
+          taskRef.current,
+          evt.nativeEvent.pageX,
+          evt.nativeEvent.pageY - pageYOffsetRef.current
+        );
         Animated.spring(pan, { toValue: { x: 0, y: 0 }, useNativeDriver: true }).start();
       },
     })
@@ -160,6 +186,7 @@ export default function TaskCard({
           </Text>
         </Pressable>
         <View
+          ref={handleViewRef}
           {...panResponder.panHandlers}
           style={[styles.dragHandle, { paddingLeft: 6 * scale, paddingVertical: 2 * scale }]}
           hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
@@ -169,7 +196,13 @@ export default function TaskCard({
         </View>
       </View>
 
-      <Pressable onPress={handleTap}>
+      {/* The body (description, due date, and the blank space around them)
+          answers a long-press with the same action menu as the title. */}
+      <Pressable
+        onPress={handleTap}
+        onLongPress={() => onMoveRequest?.(task)}
+        delayLongPress={300}
+      >
         {task.description.length > 0 && (
           <Text
             style={[
@@ -255,14 +288,15 @@ const styles = StyleSheet.create({
   },
   iconButton: {},
   editIcon: {
-    color: 'rgba(0,0,0,0.45)',
+    color: 'rgba(0,0,0,0.65)',
   },
   delete: {
-    color: 'rgba(0,0,0,0.4)',
+    // Dark enough to read as enabled on every Post-It color.
+    color: 'rgba(0,0,0,0.65)',
   },
   dragHandle: {},
   dragHandleIcon: {
-    color: 'rgba(0,0,0,0.35)',
+    color: 'rgba(0,0,0,0.65)',
   },
   description: {
     marginTop: 6,
